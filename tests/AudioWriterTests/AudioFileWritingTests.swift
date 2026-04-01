@@ -14,16 +14,17 @@ final class AudioFileWritingTests: XCTestCase {
         writer.waitUntilWriteStarts()
 
         let finishReturned = expectation(description: "finish returned")
-        finishReturned.isInverted = true
+        let finishState = LockedValue(false)
 
         DispatchQueue.global(qos: .userInitiated).async {
             coordinator.finish()
+            finishState.setValue(true)
             finishReturned.fulfill()
         }
 
-        wait(for: [finishReturned], timeout: 0.1)
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertFalse(finishState.value)
 
-        finishReturned.isInverted = false
         writer.releaseWrite()
 
         wait(for: [finishReturned], timeout: 1.0)
@@ -65,6 +66,27 @@ private final class BlockingAudioFileWriter: AudioFileWriter {
     }
 }
 
+private final class LockedValue<Value> {
+    private let lock = NSLock()
+    private var storage: Value
+
+    init(_ value: Value) {
+        storage = value
+    }
+
+    var value: Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func setValue(_ newValue: Value) {
+        lock.lock()
+        storage = newValue
+        lock.unlock()
+    }
+}
+
 private func makeBuffer(samples: [Float]) -> AVAudioPCMBuffer {
     let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
     let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))!
@@ -94,14 +116,12 @@ private func overwrite(buffer: AVAudioPCMBuffer, with samples: [Float]) {
 }
 
 private func sampleBytes(from buffer: AVAudioPCMBuffer) -> Data {
-    guard
-        let channelData = buffer.floatChannelData,
-        let firstChannel = channelData.pointee
-    else {
+    guard let channelData = buffer.floatChannelData else {
         XCTFail("Expected float channel data")
         return Data()
     }
 
+    let firstChannel = channelData[0]
     let byteCount = Int(buffer.frameLength) * MemoryLayout<Float>.size
     return Data(bytes: firstChannel, count: byteCount)
 }
