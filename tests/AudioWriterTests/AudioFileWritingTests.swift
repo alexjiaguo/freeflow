@@ -119,13 +119,14 @@ final class AudioFileWritingTests: XCTestCase {
             try? fileManager.removeItem(at: outputURL)
         }
 
-        process.executableURL = URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/xctest")
+        let currentRunnerPath = ProcessInfo.processInfo.arguments[0]
+
+        process.executableURL = URL(fileURLWithPath: currentRunnerPath)
         process.arguments = [
             "-XCTest",
             "AudioWriterTests.AudioFileWritingTests/test_writeFailureLatchesAndRejectsLaterWrites",
             Bundle(for: Self.self).bundlePath,
         ]
-        process.currentDirectoryURL = URL(fileURLWithPath: "/Volumes/Download/ai-projects/temp/freeflow/.claude/worktrees/audio-writer")
 
         var environment = ProcessInfo.processInfo.environment
         environment["AUDIO_WRITER_FAILURE_CHILD"] = "1"
