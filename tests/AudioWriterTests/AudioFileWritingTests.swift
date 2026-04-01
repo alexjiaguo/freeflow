@@ -162,6 +162,56 @@ final class AudioFileWritingTests: XCTestCase {
         XCTAssertEqual(secondWriter.writeCount, 1)
     }
 
+    func test_avAudioFileWriterAdapterWritesPayloadWithOriginalAudioContent() throws {
+        let payload = AudioWritePayload(copying: makeBuffer(samples: [0.25, -0.5, 0.75, -1.0]))
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("caf")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let outputFile = try AVAudioFile(
+            forWriting: fileURL,
+            settings: settings(for: payload.formatDescription, channelCount: payload.channelCount),
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        let writer = AVAudioFileWriterAdapter(file: outputFile)
+
+        try writer.write(payload)
+
+        let inputFile = try AVAudioFile(forReading: fileURL)
+        let writtenBuffer = AVAudioPCMBuffer(pcmFormat: inputFile.processingFormat, frameCapacity: AVAudioFrameCount(inputFile.length))!
+        try inputFile.read(into: writtenBuffer)
+
+        XCTAssertEqual(writtenBuffer.frameLength, payload.frameLength)
+        XCTAssertEqual(writtenBuffer.format.channelCount, payload.channelCount)
+        XCTAssertEqual(sampleBytes(from: writtenBuffer), payload.sampleBytes)
+    }
+
+    func test_avAudioFileWriterAdapterRejectsPayloadWithInvalidSampleByteCount() throws {
+        let validPayload = AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2, 0.3]))
+        let invalidPayload = AudioWritePayload(
+            formatDescription: validPayload.formatDescription,
+            channelCount: validPayload.channelCount,
+            frameLength: validPayload.frameLength,
+            sampleBytes: Data(validPayload.sampleBytes.dropLast())
+        )
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("caf")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let outputFile = try AVAudioFile(
+            forWriting: fileURL,
+            settings: settings(for: validPayload.formatDescription, channelCount: validPayload.channelCount),
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        let writer = AVAudioFileWriterAdapter(file: outputFile)
+
+        XCTAssertThrowsError(try writer.write(invalidPayload))
+    }
+
     func test_enqueueWriteRacingWithFinishIsEitherAcceptedOrRejectedNeverLost() {
         let writer = RecordingAudioFileWriter()
         let coordinator = AudioWriteCoordinator()
@@ -315,4 +365,17 @@ private func sampleBytes(from buffer: AVAudioPCMBuffer) -> Data {
     let firstChannel = channelData[0]
     let byteCount = Int(buffer.frameLength) * MemoryLayout<Float>.size
     return Data(bytes: firstChannel, count: byteCount)
+}
+
+private func settings(for description: AudioStreamBasicDescription,
+                      channelCount: AVAudioChannelCount) -> [String: Any] {
+    [
+        AVFormatIDKey: Int(description.mFormatID),
+        AVSampleRateKey: description.mSampleRate,
+        AVNumberOfChannelsKey: Int(channelCount),
+        AVLinearPCMBitDepthKey: Int(description.mBitsPerChannel),
+        AVLinearPCMIsFloatKey: true,
+        AVLinearPCMIsNonInterleaved: true,
+        AVLinearPCMIsBigEndianKey: false,
+    ]
 }
