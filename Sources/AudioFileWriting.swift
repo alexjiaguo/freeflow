@@ -25,16 +25,14 @@ struct AudioWritePayload {
         let formatDescription = buffer.format.streamDescription.pointee
         let channelCount = buffer.format.channelCount
         let frameLength = buffer.frameLength
-        let bytesPerFrame = Int(formatDescription.mBytesPerFrame)
-        let byteCount = Int(frameLength) * bytesPerFrame
 
-        let sampleBytes: Data
-        if let channelData = buffer.floatChannelData {
-            let firstChannel = channelData[0]
-            sampleBytes = Data(bytes: firstChannel, count: byteCount)
-        } else {
-            sampleBytes = Data()
+        precondition(channelCount == 1, "AudioWritePayload(copying:) only supports mono buffers in Task 3")
+        guard let channelData = buffer.floatChannelData else {
+            preconditionFailure("AudioWritePayload(copying:) requires float channel data in Task 3")
         }
+
+        let byteCount = Int(frameLength) * Int(formatDescription.mBytesPerFrame)
+        let sampleBytes = Data(bytes: channelData[0], count: byteCount)
 
         self.init(
             formatDescription: formatDescription,
@@ -88,7 +86,11 @@ final class AudioWriteCoordinator {
                 self?.pendingWrites.leave()
             }
 
-            try? activeWriter?.write(payload)
+            do {
+                try activeWriter?.write(payload)
+            } catch {
+                assertionFailure("Audio write failed: \(error)")
+            }
         }
 
         return true
