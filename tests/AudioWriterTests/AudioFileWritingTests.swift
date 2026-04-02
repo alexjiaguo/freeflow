@@ -8,7 +8,7 @@ final class AudioFileWritingTests: XCTestCase {
         let coordinator = AudioWriteCoordinator()
         coordinator.start(writer: writer)
 
-        let payload = AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2, 0.3, 0.4]))
+        let payload = try! AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2, 0.3, 0.4]))
         XCTAssertTrue(coordinator.enqueueWrite(payload))
 
         writer.waitUntilWriteStarts()
@@ -17,7 +17,7 @@ final class AudioFileWritingTests: XCTestCase {
         let finishState = LockedValue(false)
 
         DispatchQueue.global(qos: .userInitiated).async {
-            coordinator.finish()
+            try! coordinator.finish()
             finishState.setValue(true)
             finishReturned.fulfill()
         }
@@ -35,7 +35,7 @@ final class AudioFileWritingTests: XCTestCase {
         let originalStreamDescription = buffer.format.streamDescription.pointee
         let originalBytes = sampleBytes(from: buffer)
 
-        let payload = AudioWritePayload(copying: buffer)
+        let payload = try AudioWritePayload(copying: buffer)
 
         overwrite(buffer: buffer, with: [1.0, 1.0, 1.0, 1.0])
 
@@ -47,22 +47,41 @@ final class AudioFileWritingTests: XCTestCase {
         XCTAssertEqual(payload.sampleBytes, originalBytes)
     }
 
+    func test_payloadCopyPreservesStereoChannelBytesAfterSourceBufferMutation() throws {
+        let buffer = makeBuffer(channelSamples: [
+            [0.1, 0.2, 0.3],
+            [-0.1, -0.2, -0.3],
+        ])
+        let originalBytes = sampleBytes(from: buffer)
+
+        let payload = try AudioWritePayload(copying: buffer)
+
+        overwrite(buffer: buffer, with: [
+            [1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0],
+        ])
+
+        XCTAssertEqual(payload.channelCount, 2)
+        XCTAssertEqual(payload.frameLength, 3)
+        XCTAssertEqual(payload.sampleBytes, originalBytes)
+    }
+
     func test_finish_rejectsWritesAfterShutdownBegins() {
         let writer = BlockingAudioFileWriter()
         let coordinator = AudioWriteCoordinator()
         coordinator.start(writer: writer)
 
-        XCTAssertTrue(coordinator.enqueueWrite(AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2]))))
+        XCTAssertTrue(coordinator.enqueueWrite(try! AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2]))))
         writer.waitUntilWriteStarts()
 
         let finishReturned = expectation(description: "finish returned")
         DispatchQueue.global(qos: .userInitiated).async {
-            coordinator.finish()
+            try! coordinator.finish()
             finishReturned.fulfill()
         }
 
         Thread.sleep(forTimeInterval: 0.1)
-        XCTAssertFalse(coordinator.enqueueWrite(AudioWritePayload(copying: makeBuffer(samples: [0.3, 0.4]))))
+        XCTAssertFalse(coordinator.enqueueWrite(try! AudioWritePayload(copying: makeBuffer(samples: [0.3, 0.4]))))
 
         writer.releaseWrite()
 
@@ -75,7 +94,7 @@ final class AudioFileWritingTests: XCTestCase {
         coordinator.start(writer: RecordingAudioFileWriter())
 
         let start = Date()
-        coordinator.finish()
+        try! coordinator.finish()
 
         XCTAssertLessThan(Date().timeIntervalSince(start), 0.1)
     }
@@ -84,13 +103,13 @@ final class AudioFileWritingTests: XCTestCase {
         let coordinator = AudioWriteCoordinator()
         coordinator.start(writer: RecordingAudioFileWriter())
 
-        coordinator.finish()
+        try! coordinator.finish()
 
         let secondFinishStartedAt = Date()
-        coordinator.finish()
+        try! coordinator.finish()
 
         XCTAssertLessThan(Date().timeIntervalSince(secondFinishStartedAt), 0.1)
-        XCTAssertFalse(coordinator.enqueueWrite(AudioWritePayload(copying: makeBuffer(samples: [0.1]))))
+        XCTAssertFalse(coordinator.enqueueWrite(try! AudioWritePayload(copying: makeBuffer(samples: [0.1]))))
     }
 
     func test_writeFailureLatchesAndRejectsLaterWrites() throws {
@@ -99,11 +118,11 @@ final class AudioFileWritingTests: XCTestCase {
             let coordinator = AudioWriteCoordinator()
             coordinator.start(writer: writer)
 
-            XCTAssertTrue(coordinator.enqueueWrite(AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2]))))
+            XCTAssertTrue(coordinator.enqueueWrite(try! AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2]))))
             writer.waitUntilWriteStarts()
             Thread.sleep(forTimeInterval: 0.1)
-            XCTAssertFalse(coordinator.enqueueWrite(AudioWritePayload(copying: makeBuffer(samples: [0.3, 0.4]))))
-            coordinator.finish()
+            XCTAssertFalse(coordinator.enqueueWrite(try! AudioWritePayload(copying: makeBuffer(samples: [0.3, 0.4]))))
+            XCTAssertThrowsError(try coordinator.finish())
             return
         }
 
@@ -151,19 +170,48 @@ final class AudioFileWritingTests: XCTestCase {
         let coordinator = AudioWriteCoordinator()
 
         coordinator.start(writer: firstWriter)
-        XCTAssertTrue(coordinator.enqueueWrite(AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2]))))
-        coordinator.finish()
+        XCTAssertTrue(coordinator.enqueueWrite(try! AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2]))))
+        try! coordinator.finish()
 
         coordinator.start(writer: secondWriter)
-        XCTAssertTrue(coordinator.enqueueWrite(AudioWritePayload(copying: makeBuffer(samples: [0.3, 0.4]))))
-        coordinator.finish()
+        XCTAssertTrue(coordinator.enqueueWrite(try! AudioWritePayload(copying: makeBuffer(samples: [0.3, 0.4]))))
+        try! coordinator.finish()
 
         XCTAssertEqual(firstWriter.writeCount, 1)
         XCTAssertEqual(secondWriter.writeCount, 1)
     }
 
     func test_avAudioFileWriterAdapterWritesPayloadWithOriginalAudioContent() throws {
-        let payload = AudioWritePayload(copying: makeBuffer(samples: [0.25, -0.5, 0.75, -1.0]))
+        let payload = try AudioWritePayload(copying: makeBuffer(samples: [0.25, -0.5, 0.75, -1.0]))
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("caf")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let outputFile = try AVAudioFile(
+            forWriting: fileURL,
+            settings: settings(for: payload.formatDescription, channelCount: payload.channelCount),
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        let writer = AVAudioFileWriterAdapter(file: outputFile)
+
+        try writer.write(payload)
+
+        let inputFile = try AVAudioFile(forReading: fileURL)
+        let writtenBuffer = AVAudioPCMBuffer(pcmFormat: inputFile.processingFormat, frameCapacity: AVAudioFrameCount(inputFile.length))!
+        try inputFile.read(into: writtenBuffer)
+
+        XCTAssertEqual(writtenBuffer.frameLength, payload.frameLength)
+        XCTAssertEqual(writtenBuffer.format.channelCount, payload.channelCount)
+        XCTAssertEqual(sampleBytes(from: writtenBuffer), payload.sampleBytes)
+    }
+
+    func test_avAudioFileWriterAdapterWritesStereoPayloadWithOriginalAudioContent() throws {
+        let payload = try AudioWritePayload(copying: makeBuffer(channelSamples: [
+            [0.25, -0.5, 0.75, -1.0],
+            [-0.25, 0.5, -0.75, 1.0],
+        ]))
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("caf")
@@ -189,7 +237,7 @@ final class AudioFileWritingTests: XCTestCase {
     }
 
     func test_avAudioFileWriterAdapterRejectsPayloadWithInvalidSampleByteCount() throws {
-        let validPayload = AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2, 0.3]))
+        let validPayload = try AudioWritePayload(copying: makeBuffer(samples: [0.1, 0.2, 0.3]))
         let invalidPayload = AudioWritePayload(
             formatDescription: validPayload.formatDescription,
             channelCount: validPayload.channelCount,
@@ -225,7 +273,7 @@ final class AudioFileWritingTests: XCTestCase {
         for index in 0..<attemptCount {
             attemptGroup.enter()
             workQueue.async {
-                let accepted = coordinator.enqueueWrite(AudioWritePayload(copying: makeBuffer(samples: [Float(index)])))
+                let accepted = coordinator.enqueueWrite(try! AudioWritePayload(copying: makeBuffer(samples: [Float(index)])))
                 if accepted {
                     acceptedCount.withValue { current in current + 1 }
                 }
@@ -234,12 +282,12 @@ final class AudioFileWritingTests: XCTestCase {
         }
 
         workQueue.async {
-            coordinator.finish()
+            try! coordinator.finish()
         }
 
         XCTAssertEqual(attemptGroup.wait(timeout: .now() + 2.0), .success)
 
-        coordinator.finish()
+        try! coordinator.finish()
 
         XCTAssertEqual(writer.writeCount, acceptedCount.value)
         XCTAssertLessThanOrEqual(writer.writeCount, attemptCount)
@@ -329,30 +377,50 @@ private final class LockedValue<Value> {
 }
 
 private func makeBuffer(samples: [Float]) -> AVAudioPCMBuffer {
-    let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
-    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))!
-    buffer.frameLength = AVAudioFrameCount(samples.count)
+    makeBuffer(channelSamples: [samples])
+}
+
+private func makeBuffer(channelSamples: [[Float]]) -> AVAudioPCMBuffer {
+    let channelCount = channelSamples.count
+    let frameCount = channelSamples.first?.count ?? 0
+    XCTAssertGreaterThan(channelCount, 0)
+    XCTAssertTrue(channelSamples.allSatisfy { $0.count == frameCount })
+
+    let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: AVAudioChannelCount(channelCount))!
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount))!
+    buffer.frameLength = AVAudioFrameCount(frameCount)
 
     guard let channelData = buffer.floatChannelData else {
         XCTFail("Expected float channel data")
         return buffer
     }
 
-    for (index, sample) in samples.enumerated() {
-        channelData[0][index] = sample
+    for (channelIndex, samples) in channelSamples.enumerated() {
+        for (frameIndex, sample) in samples.enumerated() {
+            channelData[channelIndex][frameIndex] = sample
+        }
     }
 
     return buffer
 }
 
 private func overwrite(buffer: AVAudioPCMBuffer, with samples: [Float]) {
+    overwrite(buffer: buffer, with: [samples])
+}
+
+private func overwrite(buffer: AVAudioPCMBuffer, with channelSamples: [[Float]]) {
     guard let channelData = buffer.floatChannelData else {
         XCTFail("Expected float channel data")
         return
     }
 
-    for (index, sample) in samples.enumerated() {
-        channelData[0][index] = sample
+    XCTAssertEqual(channelSamples.count, Int(buffer.format.channelCount))
+    XCTAssertTrue(channelSamples.allSatisfy { $0.count == Int(buffer.frameLength) })
+
+    for (channelIndex, samples) in channelSamples.enumerated() {
+        for (frameIndex, sample) in samples.enumerated() {
+            channelData[channelIndex][frameIndex] = sample
+        }
     }
 }
 
@@ -362,9 +430,19 @@ private func sampleBytes(from buffer: AVAudioPCMBuffer) -> Data {
         return Data()
     }
 
-    let firstChannel = channelData[0]
-    let byteCount = Int(buffer.frameLength) * MemoryLayout<Float>.size
-    return Data(bytes: firstChannel, count: byteCount)
+    let bytesPerChannel = Int(buffer.frameLength) * MemoryLayout<Float>.size
+    let totalByteCount = bytesPerChannel * Int(buffer.format.channelCount)
+    var bytes = Data(capacity: totalByteCount)
+
+    for channelIndex in 0..<Int(buffer.format.channelCount) {
+        let channelBytes = UnsafeRawBufferPointer(
+            start: channelData[channelIndex],
+            count: bytesPerChannel
+        )
+        bytes.append(contentsOf: channelBytes)
+    }
+
+    return bytes
 }
 
 private func settings(for description: AudioStreamBasicDescription,

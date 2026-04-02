@@ -21,18 +21,26 @@ struct AudioWritePayload {
         self.sampleBytes = sampleBytes
     }
 
-    init(copying buffer: AVAudioPCMBuffer) {
+    init(copying buffer: AVAudioPCMBuffer) throws {
         let formatDescription = buffer.format.streamDescription.pointee
         let channelCount = buffer.format.channelCount
         let frameLength = buffer.frameLength
 
-        precondition(channelCount == 1, "AudioWritePayload(copying:) only supports mono buffers in Task 3")
         guard let channelData = buffer.floatChannelData else {
-            preconditionFailure("AudioWritePayload(copying:) requires float channel data in Task 3")
+            throw AudioWritePayloadError.unsupportedBufferLayout
         }
 
-        let byteCount = Int(frameLength) * Int(formatDescription.mBytesPerFrame)
-        let sampleBytes = Data(bytes: channelData[0], count: byteCount)
+        let bytesPerChannel = Int(frameLength) * MemoryLayout<Float>.size
+        let totalByteCount = Int(frameLength) * Int(channelCount) * MemoryLayout<Float>.size
+        var sampleBytes = Data(capacity: totalByteCount)
+
+        for channelIndex in 0..<Int(channelCount) {
+            let channelBytes = UnsafeRawBufferPointer(
+                start: channelData[channelIndex],
+                count: bytesPerChannel
+            )
+            sampleBytes.append(contentsOf: channelBytes)
+        }
 
         self.init(
             formatDescription: formatDescription,
@@ -43,7 +51,7 @@ struct AudioWritePayload {
     }
 
     var expectedSampleByteCount: Int {
-        Int(frameLength) * Int(formatDescription.mBytesPerFrame)
+        Int(frameLength) * Int(channelCount) * MemoryLayout<Float>.size
     }
 }
 
@@ -72,16 +80,24 @@ final class AVAudioFileWriterAdapter: AudioFileWriter {
         }
 
         guard let channelData = buffer.floatChannelData else {
-            throw AudioWritePayloadError.missingChannelData
+            throw AudioWritePayloadError.unsupportedBufferLayout
         }
 
         buffer.frameLength = payload.frameLength
+
+        let bytesPerChannel = Int(payload.frameLength) * MemoryLayout<Float>.size
         payload.sampleBytes.withUnsafeBytes { sourceBytes in
-            let destination = UnsafeMutableRawBufferPointer(
-                start: UnsafeMutableRawPointer(channelData[0]),
-                count: payload.sampleBytes.count
-            )
-            destination.copyMemory(from: sourceBytes)
+            for channelIndex in 0..<Int(payload.channelCount) {
+                let byteOffset = channelIndex * bytesPerChannel
+                let source = UnsafeRawBufferPointer(
+                    rebasing: sourceBytes[byteOffset..<(byteOffset + bytesPerChannel)]
+                )
+                let destination = UnsafeMutableRawBufferPointer(
+                    start: channelData[channelIndex],
+                    count: bytesPerChannel
+                )
+                destination.copyMemory(from: source)
+            }
         }
 
         try file.write(from: buffer)
@@ -95,7 +111,6 @@ final class AudioWriteCoordinator {
 
     private var writer: AudioFileWriter?
     private var isAcceptingWrites = false
-    private var pendingWriteCount = 0
     private var firstFailure: Error?
     private var hasLoggedFailure = false
 
@@ -103,7 +118,6 @@ final class AudioWriteCoordinator {
         stateLock.lock()
         self.writer = writer
         isAcceptingWrites = true
-        pendingWriteCount = 0
         firstFailure = nil
         hasLoggedFailure = false
         stateLock.unlock()
@@ -118,7 +132,6 @@ final class AudioWriteCoordinator {
             return false
         }
 
-        pendingWriteCount += 1
         activeWriter = writer
         pendingWrites.enter()
         stateLock.unlock()
@@ -138,19 +151,24 @@ final class AudioWriteCoordinator {
         return true
     }
 
-    func finish() {
+    func finish() throws {
         stateLock.lock()
         isAcceptingWrites = false
         writer = nil
         stateLock.unlock()
 
         pendingWrites.wait()
+
+        stateLock.lock()
+        let failure = firstFailure
+        stateLock.unlock()
+
+        if let failure {
+            throw failure
+        }
     }
 
     private func completePendingWrite() {
-        stateLock.lock()
-        pendingWriteCount -= 1
-        stateLock.unlock()
         pendingWrites.leave()
     }
 
@@ -178,5 +196,5 @@ private enum AudioWritePayloadError: Error {
     case invalidSampleByteCount(expected: Int, actual: Int)
     case invalidFormatDescription
     case bufferAllocationFailed
-    case missingChannelData
+    case unsupportedBufferLayout
 }

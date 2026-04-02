@@ -122,9 +122,10 @@ enum AudioRecorderError: LocalizedError {
 
 class AudioRecorder: NSObject, ObservableObject {
     private var audioEngine: AVAudioEngine?
-    private var audioFile: AVAudioFile?
     private var tempFileURL: URL?
-    private let audioFileQueue = DispatchQueue(label: "com.zachlatta.freeflow.audiofile")
+    private let writeCoordinator = AudioWriteCoordinator()
+    private let inFlightTapCallbacks = DispatchGroup()
+    private let didEncounterRecordingFailure = OSAllocatedUnfairLock(initialState: false)
     private var recordingStartTime: CFAbsoluteTime = 0
     private var firstBufferLogged = false
     private var bufferCount: Int = 0
@@ -147,6 +148,7 @@ class AudioRecorder: NSObject, ObservableObject {
         firstBufferLogged = false
         bufferCount = 0
         readyFired = false
+        didEncounterRecordingFailure.withLock { $0 = false }
 
         os_log(.info, log: recordingLog, "startRecording() entered")
 
@@ -185,20 +187,33 @@ class AudioRecorder: NSObject, ObservableObject {
 
             let inputNode = engine.inputNode
             os_log(.info, log: recordingLog, "inputNode accessed: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
-            let inputFormat = inputNode.outputFormat(forBus: 0)
-            os_log(.info, log: recordingLog, "inputFormat retrieved (rate=%.0f, ch=%d): %.3fms", inputFormat.sampleRate, inputFormat.channelCount, (CFAbsoluteTimeGetCurrent() - t0) * 1000)
-            guard inputFormat.sampleRate > 0 else {
-                throw AudioRecorderError.invalidInputFormat("Invalid sample rate: \(inputFormat.sampleRate)")
+            let hardwareInputFormat = inputNode.outputFormat(forBus: 0)
+            os_log(.info, log: recordingLog, "inputFormat retrieved (rate=%.0f, ch=%d): %.3fms", hardwareInputFormat.sampleRate, hardwareInputFormat.channelCount, (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+            guard hardwareInputFormat.sampleRate > 0 else {
+                throw AudioRecorderError.invalidInputFormat("Invalid sample rate: \(hardwareInputFormat.sampleRate)")
             }
-            guard inputFormat.channelCount > 0 else {
+            guard hardwareInputFormat.channelCount > 0 else {
                 throw AudioRecorderError.invalidInputFormat("No input channels available")
             }
+            guard let recordingFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: hardwareInputFormat.sampleRate,
+                channels: hardwareInputFormat.channelCount,
+                interleaved: false
+            ) else {
+                throw AudioRecorderError.invalidInputFormat("Could not create Float32 recording format")
+            }
 
-            storedInputFormat = inputFormat
+            storedInputFormat = recordingFormat
 
             // Install tap — checks isRecording and audioFile dynamically
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-                guard let self, self._recording.withLock({ $0 }) else { return }
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: recordingFormat) { [weak self] buffer, _ in
+                guard let self else { return }
+
+                self.inFlightTapCallbacks.enter()
+                defer { self.inFlightTapCallbacks.leave() }
+
+                guard self._recording.withLock({ $0 }) else { return }
 
                 self.bufferCount += 1
 
@@ -222,17 +237,23 @@ class AudioRecorder: NSObject, ObservableObject {
                     self.readyFired = true
                     let elapsed = (CFAbsoluteTimeGetCurrent() - self.recordingStartTime) * 1000
                     os_log(.info, log: recordingLog, "FIRST non-silent buffer at %.3fms — recording ready", elapsed)
-                    self.onRecordingReady?()
+                    let onRecordingReady = self.onRecordingReady
+                    DispatchQueue.main.async {
+                        onRecordingReady?()
+                    }
                 }
 
-                self.audioFileQueue.sync {
-                    if let file = self.audioFile {
-                        do {
-                            try file.write(from: buffer)
-                        } catch {
-                            self.audioFile = nil
-                        }
+                do {
+                    let payload = try AudioWritePayload(copying: buffer)
+                    guard self.writeCoordinator.enqueueWrite(payload) else {
+                        self.didEncounterRecordingFailure.withLock { $0 = true }
+                        os_log(.error, log: recordingLog, "audio buffer rejected after write shutdown or failure")
+                        return
                     }
+                } catch {
+                    self.didEncounterRecordingFailure.withLock { $0 = true }
+                    os_log(.error, log: recordingLog, "failed to copy audio buffer for writing: %{public}@", String(describing: error))
+                    return
                 }
                 self.computeAudioLevel(from: buffer)
             }
@@ -243,12 +264,6 @@ class AudioRecorder: NSObject, ObservableObject {
 
             self.audioEngine = engine
             self.currentDeviceUID = deviceUID
-        }
-
-        // Start engine if not already running
-        if let engine = audioEngine, !engine.isRunning {
-            try engine.start()
-            os_log(.info, log: recordingLog, "engine started: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
         }
 
         guard let inputFormat = storedInputFormat else {
@@ -269,23 +284,38 @@ class AudioRecorder: NSObject, ObservableObject {
                 AVFormatIDKey: kAudioFormatLinearPCM,
                 AVSampleRateKey: inputFormat.sampleRate,
                 AVNumberOfChannelsKey: inputFormat.channelCount,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMBitDepthKey: 32,
+                AVLinearPCMIsFloatKey: true,
                 AVLinearPCMIsBigEndianKey: false,
                 AVLinearPCMIsNonInterleaved: inputFormat.isInterleaved ? 0 : 1,
             ]
             newAudioFile = try AVAudioFile(
                 forWriting: fileURL,
                 settings: fallbackSettings,
-                commonFormat: .pcmFormatInt16,
+                commonFormat: .pcmFormatFloat32,
                 interleaved: inputFormat.isInterleaved
             )
         }
         os_log(.info, log: recordingLog, "audio file created: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
 
-        audioFileQueue.sync { self.audioFile = newAudioFile }
+        writeCoordinator.start(writer: AVAudioFileWriterAdapter(file: newAudioFile))
         _recording.withLock { $0 = true }
+
+        // Start engine if not already running after writer setup so initial buffers are captured.
+        do {
+            if let engine = audioEngine, !engine.isRunning {
+                try engine.start()
+                os_log(.info, log: recordingLog, "engine started: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+            }
+        } catch {
+            _recording.withLock { $0 = false }
+            try? writeCoordinator.finish()
+            tempFileURL = nil
+            throw error
+        }
+
         self.isRecording = true
+
         os_log(.info, log: recordingLog, "startRecording() complete: %.3fms total", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
     }
 
@@ -294,13 +324,24 @@ class AudioRecorder: NSObject, ObservableObject {
         os_log(.info, log: recordingLog, "stopRecording() called: %.3fms after start, %d buffers received", elapsed, bufferCount)
 
         _recording.withLock { $0 = false }
-        audioFileQueue.sync { audioFile = nil }
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        inFlightTapCallbacks.wait()
+        audioEngine?.stop()
+        do {
+            try writeCoordinator.finish()
+        } catch {
+            didEncounterRecordingFailure.withLock { $0 = true }
+            os_log(.error, log: recordingLog, "audio write failed during stop: %{public}@", String(describing: error))
+        }
         isRecording = false
+        if didEncounterRecordingFailure.withLock({ $0 }) {
+            smoothedLevel = 0.0
+            DispatchQueue.main.async { self.audioLevel = 0.0 }
+            return nil
+        }
         smoothedLevel = 0.0
         DispatchQueue.main.async { self.audioLevel = 0.0 }
 
-        // Stop engine so mic indicator goes away — keep engine object for fast restart
-        audioEngine?.stop()
         os_log(.info, log: recordingLog, "engine stopped (mic indicator off)")
 
         return tempFileURL
@@ -310,29 +351,17 @@ class AudioRecorder: NSObject, ObservableObject {
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return }
 
-        var sumOfSquares: Float = 0.0
+        let rms: Float
         if let channelData = buffer.floatChannelData {
-            let samples = channelData[0]
-            for i in 0..<frames {
-                let sample = samples[i]
-                sumOfSquares += sample * sample
-            }
+            rms = rootMeanSquare(from: channelData[0], frameCount: frames)
         } else if let channelData = buffer.int16ChannelData {
-            let samples = channelData[0]
-            for i in 0..<frames {
-                let sample = Float(samples[i]) / Float(Int16.max)
-                sumOfSquares += sample * sample
-            }
+            rms = rootMeanSquare(from: channelData[0], frameCount: frames)
         } else {
             return
         }
 
-        let rms = sqrtf(sumOfSquares / Float(frames))
-
-        // Scale RMS (~0.01-0.1 for speech) to 0-1 range
         let scaled = min(rms * 10.0, 1.0)
 
-        // Fast attack, slower release — follows speech dynamics closely
         if scaled > smoothedLevel {
             smoothedLevel = smoothedLevel * 0.3 + scaled * 0.7
         } else {
@@ -342,6 +371,24 @@ class AudioRecorder: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.audioLevel = self.smoothedLevel
         }
+    }
+
+    private func rootMeanSquare(from samples: UnsafePointer<Float>, frameCount: Int) -> Float {
+        var sumOfSquares: Float = 0.0
+        for index in 0..<frameCount {
+            let sample = samples[index]
+            sumOfSquares += sample * sample
+        }
+        return sqrtf(sumOfSquares / Float(frameCount))
+    }
+
+    private func rootMeanSquare(from samples: UnsafePointer<Int16>, frameCount: Int) -> Float {
+        var sumOfSquares: Float = 0.0
+        for index in 0..<frameCount {
+            let sample = Float(samples[index]) / Float(Int16.max)
+            sumOfSquares += sample * sample
+        }
+        return sqrtf(sumOfSquares / Float(frameCount))
     }
 
     func cleanup() {
