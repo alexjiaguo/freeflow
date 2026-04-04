@@ -286,6 +286,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var pendingShortcutStartMode: RecordingTriggerMode?
     private var shouldMonitorHotkeys = false
     private var isCapturingShortcut = false
+    private var startupAttemptState = RecordingStartupAttemptState.idle
+    private var startupTimeoutTask: Task<Void, Never>?
+    private let startupPolicy = RecordingStartupPolicy()
 
     init() {
         let hasCompletedSetup = UserDefaults.standard.bool(forKey: "hasCompletedSetup")
@@ -955,13 +958,36 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func beginRecording(triggerMode: RecordingTriggerMode) {
         os_log(.info, log: recordingLog, "beginRecording() entered")
-        errorMessage = nil
 
+        let decision = startupPolicy.overlapDecision(isStartupInProgress: startupAttemptState.isStarting)
+        guard decision == .startNewAttempt else {
+            os_log(.info, log: recordingLog, "startup already in progress — ignoring new trigger")
+            return
+        }
+
+        let attemptID = UUID().uuidString
+        startupAttemptState = startupAttemptState.startingNewAttempt(id: attemptID)
+        os_log(.info, log: recordingLog, "startup attempt %{public}@ created", attemptID)
+
+        errorMessage = nil
         isRecording = true
         statusText = "Starting..."
         hasShownScreenshotPermissionAlert = false
 
-        // Show initializing dots only if engine takes longer than 0.5s to start
+        startupTimeoutTask?.cancel()
+        startupTimeoutTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(4 * 1_000_000_000))
+            } catch { return }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                guard self.startupAttemptState.shouldAcceptCompletion(for: attemptID) else { return }
+                os_log(.error, log: recordingLog, "startup timeout fired for attempt %{public}@", attemptID)
+                self.startupAttemptState = self.startupAttemptState.timedOutAttempt(id: attemptID)
+                self.handleStartupFailure(attemptID: attemptID)
+            }
+        }
+
         var overlayShown = false
         let initTimer = DispatchSource.makeTimerSource(queue: .main)
         initTimer.schedule(deadline: .now() + 0.5)
@@ -973,13 +999,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         initTimer.resume()
 
-        // Transition to waveform when first real audio arrives (any non-zero RMS)
         let deviceUID = selectedMicrophoneID
         audioRecorder.onRecordingReady = { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard self.startupAttemptState.shouldAcceptCompletion(for: attemptID) else {
+                    os_log(.info, log: recordingLog, "stale ready callback for attempt %{public}@ — ignoring", attemptID)
+                    return
+                }
+                self.startupTimeoutTask?.cancel()
+                self.startupTimeoutTask = nil
+                self.startupAttemptState = self.startupAttemptState.completedAttempt(id: attemptID)
+
                 initTimer.cancel()
-                os_log(.info, log: recordingLog, "first real audio — transitioning to waveform")
+                os_log(.info, log: recordingLog, "recorder ready — transitioning to waveform (attempt %{public}@)", attemptID)
                 self.statusText = "Recording..."
                 if overlayShown {
                     self.overlayManager.transitionToRecording(mode: self.activeRecordingTriggerMode ?? triggerMode)
@@ -991,11 +1024,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         }
 
-        // Start engine on background thread so UI isn't blocked
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let t0 = CFAbsoluteTimeGetCurrent()
             do {
+                os_log(.info, log: recordingLog, "recorder startup entered")
                 try self.audioRecorder.startRecording(deviceUID: deviceUID)
                 os_log(.info, log: recordingLog, "audioRecorder.startRecording() done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
                 DispatchQueue.main.async {
@@ -1009,15 +1042,40 @@ final class AppState: ObservableObject, @unchecked Sendable {
             } catch {
                 DispatchQueue.main.async {
                     initTimer.cancel()
-                    self.isRecording = false
-                    self.activeRecordingTriggerMode = nil
-                    self.shortcutSessionController.reset()
-                    self.errorMessage = self.formattedRecordingStartError(error)
-                    self.statusText = "Error"
-                    self.overlayManager.dismiss()
+                    self.startupTimeoutTask?.cancel()
+                    self.startupTimeoutTask = nil
+                    guard self.startupAttemptState.shouldAcceptCompletion(for: attemptID) else { return }
+                    let reason = self.classifyStartupFailure(error)
+                    self.startupAttemptState = self.startupAttemptState.failedAttempt(id: attemptID, reason: reason)
+                    self.handleStartupFailure(attemptID: attemptID, error: error)
                 }
             }
         }
+    }
+
+    private func classifyStartupFailure(_ error: Error) -> RecordingStartupFailureReason {
+        let lower = error.localizedDescription.lowercased()
+        if lower.contains("microphone") && lower.contains("permission") {
+            return .microphonePermissionDenied
+        }
+        if lower.contains("permission") {
+            return .permissionBlocked(details: error.localizedDescription)
+        }
+        return .general(formattedRecordingStartError(error))
+    }
+
+    private func handleStartupFailure(attemptID: String, error: Error? = nil) {
+        os_log(.error, log: recordingLog, "startup failure for attempt %{public}@: %{public}@",
+               attemptID, error?.localizedDescription ?? "timeout")
+        isRecording = false
+        activeRecordingTriggerMode = nil
+        shortcutSessionController.reset()
+        errorMessage = startupAttemptState.errorMessage ?? (error.map { formattedRecordingStartError($0) })
+        statusText = startupAttemptState.statusText ?? "Error"
+        overlayManager.dismiss()
+        audioRecorder.cleanup()
+        startupAttemptState = .idle
+        os_log(.info, log: recordingLog, "cleanup/reset completed — ready for retry")
     }
 
     private func formattedRecordingStartError(_ error: Error) -> String {
@@ -1134,8 +1192,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 // Context may already be captured (sessionContext), still in-flight
                 // (inFlightContextTask), or unavailable (fallback). Either way,
                 // transcription proceeds without waiting for context.
+                let contextGatheringEnabled = self.enableContextGathering
+
                 async let transcriptResult = transcriptionService.transcribe(fileURL: transcriptionFileURL)
-                async let contextResult: AppContext = {
+                async let contextResult: AppContext? = {
+                    guard contextGatheringEnabled else { return nil }
                     if let sessionContext {
                         return sessionContext
                     } else if let ctx = await inFlightContextTask?.value {
@@ -1146,7 +1207,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 }()
 
                 let rawTranscript = try await transcriptResult
-                let appContext = await contextResult
+                let appContext: AppContext? = await contextResult
                 await MainActor.run { [weak self] in
                     self?.debugStatusMessage = "Running post-processing"
                 }
@@ -1169,10 +1230,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     postProcessingPrompt = ""
                 }
                 await MainActor.run {
-                    self.lastContextSummary = appContext.contextSummary
-                    self.lastContextScreenshotDataURL = appContext.screenshotDataURL
-                    self.lastContextScreenshotStatus = appContext.screenshotError
-                        ?? "available (\(appContext.screenshotMimeType ?? "image"))"
+                    self.lastContextSummary = appContext?.contextSummary ?? "Context analysis skipped"
+                    self.lastContextScreenshotDataURL = appContext?.screenshotDataURL
+                    self.lastContextScreenshotStatus = appContext?.screenshotError
+                        ?? (appContext != nil ? "available (\(appContext?.screenshotMimeType ?? "image"))" : "Context analysis skipped")
                     let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
                     let trimmedFinalTranscript = finalTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
                     self.lastPostProcessingPrompt = postProcessingPrompt
@@ -1219,13 +1280,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     }
                 }
             } catch {
-                let resolvedContext: AppContext
-                if let sessionContext {
-                    resolvedContext = sessionContext
-                } else if let inFlightContext = await inFlightContextTask?.value {
-                    resolvedContext = inFlightContext
+                let resolvedContext: AppContext?
+                if self.enableContextGathering {
+                    if let sessionContext {
+                        resolvedContext = sessionContext
+                    } else if let inFlightContext = await inFlightContextTask?.value {
+                        resolvedContext = inFlightContext
+                    } else {
+                        resolvedContext = fallbackContextAtStop()
+                    }
                 } else {
-                    resolvedContext = fallbackContextAtStop()
+                    resolvedContext = nil
                 }
                 await MainActor.run {
                     self.transcribingIndicatorTask?.cancel()
@@ -1240,9 +1305,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     self.lastContextSummary = ""
                     self.lastPostProcessingStatus = "Error: \(error.localizedDescription)"
                     self.lastPostProcessingPrompt = ""
-                    self.lastContextScreenshotDataURL = resolvedContext.screenshotDataURL
-                    self.lastContextScreenshotStatus = resolvedContext.screenshotError
-                        ?? "available (\(resolvedContext.screenshotMimeType ?? "image"))"
+                    self.lastContextScreenshotDataURL = resolvedContext?.screenshotDataURL
+                    self.lastContextScreenshotStatus = resolvedContext?.screenshotError
+                        ?? (resolvedContext != nil ? "available (\(resolvedContext?.screenshotMimeType ?? "image"))" : "Context analysis skipped")
                     self.recordPipelineHistoryEntry(
                         rawTranscript: "",
                         postProcessedTranscript: "",
@@ -1260,7 +1325,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         rawTranscript: String,
         postProcessedTranscript: String,
         postProcessingPrompt: String,
-        context: AppContext,
+        context: AppContext?,
         processingStatus: String,
         audioFileName: String? = nil
     ) {
@@ -1269,11 +1334,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             rawTranscript: rawTranscript,
             postProcessedTranscript: postProcessedTranscript,
             postProcessingPrompt: postProcessingPrompt,
-            contextSummary: context.contextSummary,
-            contextPrompt: context.contextPrompt,
-            contextScreenshotDataURL: context.screenshotDataURL,
-            contextScreenshotStatus: context.screenshotError
-                ?? "available (\(context.screenshotMimeType ?? "image"))",
+            contextSummary: context?.contextSummary ?? "Context analysis skipped",
+            contextPrompt: context?.contextPrompt,
+            contextScreenshotDataURL: context?.screenshotDataURL,
+            contextScreenshotStatus: context?.screenshotError
+                ?? (context != nil ? "available (\(context?.screenshotMimeType ?? "image"))" : "Context analysis skipped"),
             postProcessingStatus: processingStatus,
             debugStatus: debugStatusMessage,
             customVocabulary: customVocabulary,
@@ -1291,16 +1356,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func startContextCapture() {
+        let contextRunPolicy = AppStateContextRunPolicy(allowsContextAnalysis: enableContextGathering)
+
         contextCaptureTask?.cancel()
         capturedContext = nil
 
-        guard enableContextGathering else {
-            let fallback = fallbackContextAtStop()
-            capturedContext = fallback
-            lastContextSummary = "Context gathering disabled"
-            lastPostProcessingStatus = "Context gathering disabled"
+        guard contextRunPolicy.shouldCollectContext else {
+            capturedContext = nil
+            lastContextSummary = contextRunPolicy.disabledStatusText
+            lastPostProcessingStatus = contextRunPolicy.disabledStatusText
             lastContextScreenshotDataURL = nil
-            lastContextScreenshotStatus = "Disabled"
+            lastContextScreenshotStatus = contextRunPolicy.disabledScreenshotStatus
+            lastPostProcessingPrompt = ""
             contextCaptureTask = nil
             return
         }
@@ -1329,12 +1396,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func fallbackContextAtStop() -> AppContext {
         let frontmostApp = NSWorkspace.shared.frontmostApplication
         let windowTitle = focusedWindowTitle(for: frontmostApp)
+        let hasWindowTextContext = frontmostApp?.localizedName != nil
+        let statusMessage = FallbackContextStatusMessage.resolve(
+            contextAnalysisEnabled: enableContextGathering,
+            hasWindowTextContext: hasWindowTextContext
+        )
         return AppContext(
             appName: frontmostApp?.localizedName,
             bundleIdentifier: frontmostApp?.bundleIdentifier,
             windowTitle: windowTitle,
             selectedText: nil,
-            currentActivity: "Could not refresh app context at stop time; using text-only post-processing.",
+            currentActivity: statusMessage,
             contextPrompt: nil,
             screenshotDataURL: nil,
             screenshotMimeType: nil,

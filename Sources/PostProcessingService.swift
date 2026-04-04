@@ -62,7 +62,7 @@ Then your response would be ONLY the cleaned up text, so here your response is O
 
     func postProcess(
         transcript: String,
-        context: AppContext,
+        context: AppContext?,
         customVocabulary: String,
         customSystemPrompt: String = ""
     ) async throws -> PostProcessingResult {
@@ -76,7 +76,7 @@ Then your response would be ONLY the cleaned up text, so here your response is O
                 }
                 return try await self.process(
                     transcript: transcript,
-                    contextSummary: context.contextSummary,
+                    contextSummary: context?.contextSummary,
                     model: self.model,
                     customVocabulary: vocabularyTerms,
                     customSystemPrompt: customSystemPrompt
@@ -101,19 +101,13 @@ Then your response would be ONLY the cleaned up text, so here your response is O
         }
     }
 
-    private func process(
+    static func buildRequestBody(
         transcript: String,
-        contextSummary: String,
+        contextSummary: String?,
         model: String,
         customVocabulary: [String],
-        customSystemPrompt: String = ""
-    ) async throws -> PostProcessingResult {
-        var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = postProcessingTimeoutSeconds
-
+        customSystemPrompt: String
+    ) -> (payload: [String: Any], promptForDisplay: String) {
         let normalizedVocabulary = normalizedVocabularyText(customVocabulary)
         let vocabularyPrompt = if !normalizedVocabulary.isEmpty {
             """
@@ -132,13 +126,22 @@ Use these spellings exactly in the output when relevant:
             systemPrompt += "\n\n" + vocabularyPrompt
         }
 
-        let userMessage = """
+        let userMessage: String
+        if let contextSummary {
+            userMessage = """
 Instructions: Clean up RAW_TRANSCRIPTION and return only the cleaned transcript text without surrounding quotes. Return EMPTY if there should be no result.
 
 CONTEXT: "\(contextSummary)"
 
 RAW_TRANSCRIPTION: "\(transcript)"
 """
+        } else {
+            userMessage = """
+Instructions: Clean up RAW_TRANSCRIPTION and return only the cleaned transcript text without surrounding quotes. Return EMPTY if there should be no result.
+
+RAW_TRANSCRIPTION: "\(transcript)"
+"""
+        }
 
         let promptForDisplay = """
 Model: \(model)
@@ -165,7 +168,46 @@ Model: \(model)
             ]
         ]
 
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+        return (payload, promptForDisplay)
+    }
+
+    static func requestBodyForTests(
+        transcript: String,
+        context: AppContext?,
+        customVocabulary: [String],
+        customSystemPrompt: String
+    ) throws -> [String: Any] {
+        buildRequestBody(
+            transcript: transcript,
+            contextSummary: context?.contextSummary,
+            model: defaultModel,
+            customVocabulary: customVocabulary,
+            customSystemPrompt: customSystemPrompt
+        ).payload
+    }
+
+    private func process(
+        transcript: String,
+        contextSummary: String?,
+        model: String,
+        customVocabulary: [String],
+        customSystemPrompt: String = ""
+    ) async throws -> PostProcessingResult {
+        var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = postProcessingTimeoutSeconds
+
+        let built = Self.buildRequestBody(
+            transcript: transcript,
+            contextSummary: contextSummary,
+            model: model,
+            customVocabulary: customVocabulary,
+            customSystemPrompt: customSystemPrompt
+        )
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: built.payload, options: [])
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -187,7 +229,7 @@ Model: \(model)
 
         return PostProcessingResult(
             transcript: sanitizePostProcessedTranscript(content),
-            prompt: promptForDisplay
+            prompt: built.promptForDisplay
         )
     }
 
@@ -220,7 +262,7 @@ Model: \(model)
         return terms.filter { seen.insert($0.lowercased()).inserted }
     }
 
-    private func normalizedVocabularyText(_ vocabularyTerms: [String]) -> String {
+    private static func normalizedVocabularyText(_ vocabularyTerms: [String]) -> String {
         let terms = vocabularyTerms
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }

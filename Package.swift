@@ -16,12 +16,23 @@ let package = Package(
         .target(
             name: "AudioWriterHarness",
             path: "Sources",
-            sources: ["AudioFileWriting.swift"]
+            sources: [
+                "AudioFileWriting.swift",
+                "AppContext.swift",
+                "RecordingStartupPolicy.swift",
+                "ContextRunPolicy.swift",
+                "PostProcessingService.swift",
+            ]
         ),
         .testTarget(
             name: "AudioWriterTests",
             dependencies: ["AudioWriterHarness"],
             path: "tests/AudioWriterTests"
+        ),
+        .testTarget(
+            name: "ContextSettingsTests",
+            dependencies: ["AudioWriterHarness"],
+            path: "tests/ContextSettingsTests"
         ),
     ]
 )

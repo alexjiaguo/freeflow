@@ -2,22 +2,6 @@ import Foundation
 import ApplicationServices
 import AppKit
 
-struct AppContext {
-    let appName: String?
-    let bundleIdentifier: String?
-    let windowTitle: String?
-    let selectedText: String?
-    let currentActivity: String
-    let contextPrompt: String?
-    let screenshotDataURL: String?
-    let screenshotMimeType: String?
-    let screenshotError: String?
-
-    var contextSummary: String {
-        currentActivity
-    }
-}
-
 final class AppContextService {
     static let defaultContextPrompt = """
 You are a context synthesis assistant for a speech-to-text pipeline.
