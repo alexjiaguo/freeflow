@@ -115,6 +115,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let preserveClipboardStorageKey = "preserve_clipboard"
     private let forceHTTP2TranscriptionStorageKey = "force_http2_transcription"
     private let soundVolumeStorageKey = "sound_volume"
+    private let enableContextGatheringStorageKey = "enable_context_gathering"
+    private let postProcessingModelStorageKey = "post_processing_model"
+    static let defaultPostProcessingModel = "meta-llama/llama-4-scout-17b-16e-instruct"
     private let transcribingIndicatorDelay: TimeInterval = 1.0
     private let clipboardRestoreDelay: TimeInterval = 0.15
     let maxPipelineHistoryCount = 20
@@ -128,14 +131,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var apiKey: String {
         didSet {
             persistAPIKey(apiKey)
-            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt)
+            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt, model: postProcessingModel)
         }
     }
 
     @Published var apiBaseURL: String {
         didSet {
             persistAPIBaseURL(apiBaseURL)
-            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt)
+            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt, model: postProcessingModel)
         }
     }
 
@@ -180,7 +183,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var customContextPrompt: String {
         didSet {
             UserDefaults.standard.set(customContextPrompt, forKey: customContextPromptStorageKey)
-            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt)
+            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt, model: postProcessingModel)
         }
     }
 
@@ -217,6 +220,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var soundVolume: Float {
         didSet {
             UserDefaults.standard.set(soundVolume, forKey: soundVolumeStorageKey)
+        }
+    }
+
+    @Published var postProcessingModel: String {
+        didSet {
+            let trimmed = postProcessingModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            UserDefaults.standard.set(trimmed.isEmpty ? Self.defaultPostProcessingModel : trimmed, forKey: postProcessingModelStorageKey)
+            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt, model: postProcessingModel)
+        }
+    }
+
+    @Published var enableContextGathering: Bool {
+        didSet {
+            UserDefaults.standard.set(enableContextGathering, forKey: enableContextGatheringStorageKey)
         }
     }
 
@@ -294,6 +311,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let forceHTTP2Transcription = UserDefaults.standard.bool(forKey: forceHTTP2TranscriptionStorageKey)
         let soundVolume: Float = UserDefaults.standard.object(forKey: soundVolumeStorageKey) != nil
             ? UserDefaults.standard.float(forKey: soundVolumeStorageKey) : 1.0
+        let postProcessingModel = UserDefaults.standard.string(forKey: postProcessingModelStorageKey)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? UserDefaults.standard.string(forKey: postProcessingModelStorageKey)!
+            : Self.defaultPostProcessingModel
+        let enableContextGathering = UserDefaults.standard.object(forKey: enableContextGatheringStorageKey) == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: enableContextGatheringStorageKey)
         let initialAccessibility = AXIsProcessTrusted()
         let initialScreenCapturePermission = CGPreflightScreenCaptureAccess()
         var removedAudioFileNames: [String] = []
@@ -309,7 +332,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         let selectedMicrophoneID = UserDefaults.standard.string(forKey: selectedMicrophoneStorageKey) ?? "default"
 
-        self.contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt)
+        self.contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt, model: postProcessingModel)
         self.hasCompletedSetup = hasCompletedSetup
         self.apiKey = apiKey
         self.apiBaseURL = apiBaseURL
@@ -326,6 +349,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.preserveClipboard = preserveClipboard
         self.forceHTTP2Transcription = forceHTTP2Transcription
         self.soundVolume = soundVolume
+        self.postProcessingModel = postProcessingModel
+        self.enableContextGathering = enableContextGathering
         self.pipelineHistory = savedHistory
         self.hasAccessibility = initialAccessibility
         self.hasScreenRecordingPermission = initialScreenCapturePermission
@@ -528,7 +553,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             baseURL: apiBaseURL,
             forceHTTP2: forceHTTP2Transcription
         )
-        let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL)
+        let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL, model: postProcessingModel)
         let capturedCustomVocabulary = customVocabulary
         let capturedCustomSystemPrompt = customSystemPrompt
 
@@ -1101,20 +1126,27 @@ final class AppState: ObservableObject, @unchecked Sendable {
             baseURL: apiBaseURL,
             forceHTTP2: forceHTTP2Transcription
         )
-        let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL)
+        let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL, model: postProcessingModel)
 
         Task {
             do {
-                async let transcript = transcriptionService.transcribe(fileURL: transcriptionFileURL)
-                let rawTranscript = try await transcript
-                let appContext: AppContext
-                if let sessionContext {
-                    appContext = sessionContext
-                } else if let inFlightContext = await inFlightContextTask?.value {
-                    appContext = inFlightContext
-                } else {
-                    appContext = fallbackContextAtStop()
-                }
+                // Run transcription and context resolution in parallel.
+                // Context may already be captured (sessionContext), still in-flight
+                // (inFlightContextTask), or unavailable (fallback). Either way,
+                // transcription proceeds without waiting for context.
+                async let transcriptResult = transcriptionService.transcribe(fileURL: transcriptionFileURL)
+                async let contextResult: AppContext = {
+                    if let sessionContext {
+                        return sessionContext
+                    } else if let ctx = await inFlightContextTask?.value {
+                        return ctx
+                    } else {
+                        return fallbackContextAtStop()
+                    }
+                }()
+
+                let rawTranscript = try await transcriptResult
+                let appContext = await contextResult
                 await MainActor.run { [weak self] in
                     self?.debugStatusMessage = "Running post-processing"
                 }
@@ -1261,6 +1293,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func startContextCapture() {
         contextCaptureTask?.cancel()
         capturedContext = nil
+
+        guard enableContextGathering else {
+            let fallback = fallbackContextAtStop()
+            capturedContext = fallback
+            lastContextSummary = "Context gathering disabled"
+            lastPostProcessingStatus = "Context gathering disabled"
+            lastContextScreenshotDataURL = nil
+            lastContextScreenshotStatus = "Disabled"
+            contextCaptureTask = nil
+            return
+        }
+
         lastContextSummary = "Collecting app context..."
         lastPostProcessingStatus = ""
         lastContextScreenshotDataURL = nil

@@ -48,12 +48,16 @@ Then your response would be ONLY the cleaned up text, so here your response is O
 
     private let apiKey: String
     private let baseURL: String
-    private let defaultModel = "meta-llama/llama-4-scout-17b-16e-instruct"
+    private let model: String
+    static let defaultModel = "meta-llama/llama-4-scout-17b-16e-instruct"
     private let postProcessingTimeoutSeconds: TimeInterval = 20
 
-    init(apiKey: String, baseURL: String = "https://api.groq.com/openai/v1") {
+    init(apiKey: String, baseURL: String = "https://api.groq.com/openai/v1", model: String = "") {
         self.apiKey = apiKey
         self.baseURL = baseURL
+        self.model = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? Self.defaultModel
+            : model.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func postProcess(
@@ -73,7 +77,7 @@ Then your response would be ONLY the cleaned up text, so here your response is O
                 return try await self.process(
                     transcript: transcript,
                     contextSummary: context.contextSummary,
-                    model: defaultModel,
+                    model: self.model,
                     customVocabulary: vocabularyTerms,
                     customSystemPrompt: customSystemPrompt
                 )

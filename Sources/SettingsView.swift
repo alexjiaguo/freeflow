@@ -237,6 +237,9 @@ struct GeneralSettingsView: View {
                 SettingsCard("Clipboard", icon: "doc.on.clipboard") {
                     clipboardSection
                 }
+                SettingsCard("Context Awareness", icon: "eye.fill") {
+                    contextGatheringSection
+                }
                 SettingsCard("Microphone", icon: "mic.fill") {
                     microphoneSection
                 }
@@ -463,6 +466,26 @@ struct GeneralSettingsView: View {
 
             Divider()
 
+            Text("Post-Processing Model")
+                .font(.caption.weight(.semibold))
+
+            Text("The LLM model used for cleaning up transcriptions and analyzing context. Change this when using a different API provider.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                TextField(AppState.defaultPostProcessingModel, text: $appState.postProcessingModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+
+                Button("Reset to Default") {
+                    appState.postProcessingModel = AppState.defaultPostProcessingModel
+                }
+                .font(.caption)
+            }
+
+            Divider()
+
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Force HTTP/2 for Transcription")
@@ -548,6 +571,29 @@ struct GeneralSettingsView: View {
             Text("FreeFlow will temporarily place the transcript on your clipboard to paste it, then restore whatever was there before. If you copy something else before the restore happens, FreeFlow leaves it alone.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Context Awareness
+
+    private var contextGatheringSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle("Enable context gathering", isOn: $appState.enableContextGathering)
+
+            Text("When enabled, FreeFlow captures a screenshot of the active window and uses an LLM to analyze it, providing context-aware post-processing of your transcription. Disabling this skips the screenshot and LLM analysis, which can speed up dictation by 1–3 seconds.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if !appState.enableContextGathering {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.fill")
+                        .foregroundStyle(.green)
+                        .font(.caption)
+                    Text("Faster mode — post-processing will use text-only context (app name and window title).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -955,7 +1001,7 @@ struct PromptsSettingsView: View {
         systemTestError = nil
         systemTestPrompt = nil
 
-        let service = PostProcessingService(apiKey: appState.apiKey, baseURL: appState.apiBaseURL)
+        let service = PostProcessingService(apiKey: appState.apiKey, baseURL: appState.apiBaseURL, model: appState.postProcessingModel)
         let input = systemTestInput
         let customPrompt = appState.customSystemPrompt
         let vocabulary = appState.customVocabulary
