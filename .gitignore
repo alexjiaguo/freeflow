@@ -3,3 +3,8 @@ build/
 *.swp
 .env
 .worktrees/
+.claude/
+.claude-flow/
+.mcp.json
+CLAUDE.md
+docs/
