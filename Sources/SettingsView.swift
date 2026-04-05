@@ -407,12 +407,12 @@ struct GeneralSettingsView: View {
 
     private var apiKeySection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("FreeFlow uses Groq's whisper-large-v3 model for transcription.")
+            Text("Shared API key and base URL used by all services unless overridden below.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                SecureField("Enter your Groq API key", text: $apiKeyInput)
+                SecureField("Enter your API key", text: $apiKeyInput)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
                     .disabled(isValidatingKey)
@@ -442,7 +442,7 @@ struct GeneralSettingsView: View {
             Text("API Base URL")
                 .font(.caption.weight(.semibold))
 
-            Text("Change this to use a different OpenAI-compatible API provider.")
+            Text("Default base URL for all services. Override per-service below.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -466,26 +466,6 @@ struct GeneralSettingsView: View {
 
             Divider()
 
-            Text("Post-Processing Model")
-                .font(.caption.weight(.semibold))
-
-            Text("The LLM model used for cleaning up transcriptions and analyzing context. Change this when using a different API provider.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 8) {
-                TextField(AppState.defaultPostProcessingModel, text: $appState.postProcessingModel)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-
-                Button("Reset to Default") {
-                    appState.postProcessingModel = AppState.defaultPostProcessingModel
-                }
-                .font(.caption)
-            }
-
-            Divider()
-
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Force HTTP/2 for Transcription")
@@ -501,7 +481,122 @@ struct GeneralSettingsView: View {
                     .toggleStyle(.checkbox)
                     .labelsHidden()
             }
+
+            Divider()
+
+            DisclosureGroup("Per-Service Configuration") {
+                VStack(alignment: .leading, spacing: 16) {
+                    perServiceSection(
+                        title: "Transcription",
+                        icon: "waveform",
+                        apiKeyBinding: $appState.transcriptionApiKey,
+                        baseURLBinding: $appState.transcriptionBaseURL,
+                        modelBinding: $appState.transcriptionModel,
+                        defaultModel: AppState.defaultTranscriptionModel
+                    )
+
+                    Divider()
+
+                    perServiceSection(
+                        title: "Context Analysis",
+                        icon: "eye",
+                        apiKeyBinding: $appState.contextAnalysisApiKey,
+                        baseURLBinding: $appState.contextAnalysisBaseURL,
+                        modelBinding: $appState.contextAnalysisModel,
+                        defaultModel: AppState.defaultPostProcessingModel
+                    )
+
+                    Divider()
+
+                    perServiceSection(
+                        title: "Post-Processing",
+                        icon: "text.badge.checkmark",
+                        apiKeyBinding: $appState.postProcessingApiKey,
+                        baseURLBinding: $appState.postProcessingBaseURL,
+                        modelBinding: $appState.postProcessingModel,
+                        defaultModel: AppState.defaultPostProcessingModel
+                    )
+                }
+                .padding(.top, 8)
+            }
+            .font(.caption.weight(.semibold))
         }
+    }
+
+    private func perServiceSection(
+        title: String,
+        icon: String,
+        apiKeyBinding: Binding<String>,
+        baseURLBinding: Binding<String>,
+        modelBinding: Binding<String>,
+        defaultModel: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: icon)
+                .font(.caption.weight(.semibold))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("API Key")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    SecureField("Use global key", text: apiKeyBinding)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.caption, design: .monospaced))
+                    if !apiKeyBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        overrideBadge
+                        Button("Clear") { apiKeyBinding.wrappedValue = "" }
+                            .font(.caption2)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Base URL")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    TextField("Use global URL", text: baseURLBinding)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.caption, design: .monospaced))
+                    if !baseURLBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        overrideBadge
+                        Button("Clear") { baseURLBinding.wrappedValue = "" }
+                            .font(.caption2)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Model")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    TextField(defaultModel, text: modelBinding)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.caption, design: .monospaced))
+                    Button("Reset") { modelBinding.wrappedValue = "" }
+                        .font(.caption2)
+                }
+            }
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(0.04), lineWidth: 1)
+        )
+    }
+
+    private var overrideBadge: some View {
+        Text("overridden")
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.orange.opacity(0.12))
+            .cornerRadius(4)
     }
 
     private func validateAndSaveKey() {
@@ -1001,7 +1096,7 @@ struct PromptsSettingsView: View {
         systemTestError = nil
         systemTestPrompt = nil
 
-        let service = PostProcessingService(apiKey: appState.apiKey, baseURL: appState.apiBaseURL, model: appState.postProcessingModel)
+        let service = PostProcessingService(apiKey: appState.resolvedPostProcessingApiKey, baseURL: appState.resolvedPostProcessingBaseURL, model: appState.resolvedPostProcessingModel)
         let input = systemTestInput
         let customPrompt = appState.customSystemPrompt
         let vocabulary = appState.customVocabulary
@@ -1215,9 +1310,10 @@ struct PromptsSettingsView: View {
         contextTestPrompt = nil
 
         let service = AppContextService(
-            apiKey: appState.apiKey,
-            baseURL: appState.apiBaseURL,
-            customContextPrompt: appState.customContextPrompt
+            apiKey: appState.resolvedContextAnalysisApiKey,
+            baseURL: appState.resolvedContextAnalysisBaseURL,
+            customContextPrompt: appState.customContextPrompt,
+            model: appState.resolvedContextAnalysisModel
         )
 
         Task {

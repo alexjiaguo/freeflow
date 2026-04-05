@@ -98,7 +98,10 @@ private struct PendingClipboardRestore {
     let expectedChangeCount: Int
 }
 
-final class AppState: ObservableObject, @unchecked Sendable {
+/// All @Published properties must be accessed on the main thread.
+/// Background work captures local values before dispatch and uses MainActor.run to update state.
+@MainActor
+final class AppState: ObservableObject {
     private let apiKeyStorageKey = "groq_api_key"
     private let apiBaseURLStorageKey = "api_base_url"
     private let holdShortcutStorageKey = "hold_shortcut"
@@ -117,7 +120,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let soundVolumeStorageKey = "sound_volume"
     private let enableContextGatheringStorageKey = "enable_context_gathering"
     private let postProcessingModelStorageKey = "post_processing_model"
+    private let transcriptionApiKeyStorageKey = "transcription_api_key"
+    private let transcriptionBaseURLStorageKey = "transcription_base_url"
+    private let transcriptionModelStorageKey = "transcription_model"
+    private let contextAnalysisApiKeyStorageKey = "context_analysis_api_key"
+    private let contextAnalysisBaseURLStorageKey = "context_analysis_base_url"
+    private let contextAnalysisModelStorageKey = "context_analysis_model"
+    private let postProcessingApiKeyStorageKey = "post_processing_api_key"
+    private let postProcessingBaseURLStorageKey = "post_processing_base_url"
     static let defaultPostProcessingModel = "meta-llama/llama-4-scout-17b-16e-instruct"
+    static let defaultTranscriptionModel = "whisper-large-v3"
     private let transcribingIndicatorDelay: TimeInterval = 1.0
     private let clipboardRestoreDelay: TimeInterval = 0.15
     let maxPipelineHistoryCount = 20
@@ -131,14 +143,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var apiKey: String {
         didSet {
             persistAPIKey(apiKey)
-            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt, model: postProcessingModel)
+            contextService = AppContextService(apiKey: resolvedContextAnalysisApiKey, baseURL: resolvedContextAnalysisBaseURL, customContextPrompt: customContextPrompt, model: resolvedContextAnalysisModel)
         }
     }
 
     @Published var apiBaseURL: String {
         didSet {
             persistAPIBaseURL(apiBaseURL)
-            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt, model: postProcessingModel)
+            contextService = AppContextService(apiKey: resolvedContextAnalysisApiKey, baseURL: resolvedContextAnalysisBaseURL, customContextPrompt: customContextPrompt, model: resolvedContextAnalysisModel)
         }
     }
 
@@ -183,7 +195,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var customContextPrompt: String {
         didSet {
             UserDefaults.standard.set(customContextPrompt, forKey: customContextPromptStorageKey)
-            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt, model: postProcessingModel)
+            contextService = AppContextService(apiKey: resolvedContextAnalysisApiKey, baseURL: resolvedContextAnalysisBaseURL, customContextPrompt: customContextPrompt, model: resolvedContextAnalysisModel)
         }
     }
 
@@ -227,8 +239,78 @@ final class AppState: ObservableObject, @unchecked Sendable {
         didSet {
             let trimmed = postProcessingModel.trimmingCharacters(in: .whitespacesAndNewlines)
             UserDefaults.standard.set(trimmed.isEmpty ? Self.defaultPostProcessingModel : trimmed, forKey: postProcessingModelStorageKey)
-            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt, model: postProcessingModel)
         }
+    }
+
+    @Published var transcriptionApiKey: String {
+        didSet { UserDefaults.standard.set(transcriptionApiKey, forKey: transcriptionApiKeyStorageKey) }
+    }
+    @Published var transcriptionBaseURL: String {
+        didSet { UserDefaults.standard.set(transcriptionBaseURL, forKey: transcriptionBaseURLStorageKey) }
+    }
+    @Published var transcriptionModel: String {
+        didSet {
+            let trimmed = transcriptionModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            UserDefaults.standard.set(trimmed.isEmpty ? Self.defaultTranscriptionModel : trimmed, forKey: transcriptionModelStorageKey)
+        }
+    }
+
+    @Published var contextAnalysisApiKey: String {
+        didSet {
+            UserDefaults.standard.set(contextAnalysisApiKey, forKey: contextAnalysisApiKeyStorageKey)
+            contextService = AppContextService(apiKey: resolvedContextAnalysisApiKey, baseURL: resolvedContextAnalysisBaseURL, customContextPrompt: customContextPrompt, model: resolvedContextAnalysisModel)
+        }
+    }
+    @Published var contextAnalysisBaseURL: String {
+        didSet {
+            UserDefaults.standard.set(contextAnalysisBaseURL, forKey: contextAnalysisBaseURLStorageKey)
+            contextService = AppContextService(apiKey: resolvedContextAnalysisApiKey, baseURL: resolvedContextAnalysisBaseURL, customContextPrompt: customContextPrompt, model: resolvedContextAnalysisModel)
+        }
+    }
+    @Published var contextAnalysisModel: String {
+        didSet {
+            let trimmed = contextAnalysisModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            UserDefaults.standard.set(trimmed.isEmpty ? Self.defaultPostProcessingModel : trimmed, forKey: contextAnalysisModelStorageKey)
+            contextService = AppContextService(apiKey: resolvedContextAnalysisApiKey, baseURL: resolvedContextAnalysisBaseURL, customContextPrompt: customContextPrompt, model: resolvedContextAnalysisModel)
+        }
+    }
+
+    @Published var postProcessingApiKey: String {
+        didSet { UserDefaults.standard.set(postProcessingApiKey, forKey: postProcessingApiKeyStorageKey) }
+    }
+    @Published var postProcessingBaseURL: String {
+        didSet { UserDefaults.standard.set(postProcessingBaseURL, forKey: postProcessingBaseURLStorageKey) }
+    }
+
+    var resolvedTranscriptionApiKey: String {
+        transcriptionApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? apiKey : transcriptionApiKey
+    }
+    var resolvedTranscriptionBaseURL: String {
+        transcriptionBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? apiBaseURL : transcriptionBaseURL
+    }
+    var resolvedTranscriptionModel: String {
+        let trimmed = transcriptionModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? Self.defaultTranscriptionModel : trimmed
+    }
+    var resolvedContextAnalysisApiKey: String {
+        contextAnalysisApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? apiKey : contextAnalysisApiKey
+    }
+    var resolvedContextAnalysisBaseURL: String {
+        contextAnalysisBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? apiBaseURL : contextAnalysisBaseURL
+    }
+    var resolvedContextAnalysisModel: String {
+        let trimmed = contextAnalysisModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? Self.defaultPostProcessingModel : trimmed
+    }
+    var resolvedPostProcessingApiKey: String {
+        postProcessingApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? apiKey : postProcessingApiKey
+    }
+    var resolvedPostProcessingBaseURL: String {
+        postProcessingBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? apiBaseURL : postProcessingBaseURL
+    }
+    var resolvedPostProcessingModel: String {
+        let trimmed = postProcessingModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? Self.defaultPostProcessingModel : trimmed
     }
 
     @Published var enableContextGathering: Bool {
@@ -314,12 +396,29 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let forceHTTP2Transcription = UserDefaults.standard.bool(forKey: forceHTTP2TranscriptionStorageKey)
         let soundVolume: Float = UserDefaults.standard.object(forKey: soundVolumeStorageKey) != nil
             ? UserDefaults.standard.float(forKey: soundVolumeStorageKey) : 1.0
-        let postProcessingModel = UserDefaults.standard.string(forKey: postProcessingModelStorageKey)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            ? UserDefaults.standard.string(forKey: postProcessingModelStorageKey)!
-            : Self.defaultPostProcessingModel
+        let storedModel = UserDefaults.standard.string(forKey: postProcessingModelStorageKey)
+        let postProcessingModel: String = {
+            guard let m = storedModel, !m.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return Self.defaultPostProcessingModel
+            }
+            return m
+        }()
         let enableContextGathering = UserDefaults.standard.object(forKey: enableContextGatheringStorageKey) == nil
             ? true
             : UserDefaults.standard.bool(forKey: enableContextGatheringStorageKey)
+        let transcriptionApiKey = UserDefaults.standard.string(forKey: transcriptionApiKeyStorageKey) ?? ""
+        let transcriptionBaseURL = UserDefaults.standard.string(forKey: transcriptionBaseURLStorageKey) ?? ""
+        let transcriptionModel = UserDefaults.standard.string(forKey: transcriptionModelStorageKey) ?? ""
+        let contextAnalysisApiKey = UserDefaults.standard.string(forKey: contextAnalysisApiKeyStorageKey) ?? ""
+        let contextAnalysisBaseURL = UserDefaults.standard.string(forKey: contextAnalysisBaseURLStorageKey) ?? ""
+        let contextAnalysisModel = UserDefaults.standard.string(forKey: contextAnalysisModelStorageKey) ?? ""
+        let postProcessingApiKey = UserDefaults.standard.string(forKey: postProcessingApiKeyStorageKey) ?? ""
+        let postProcessingBaseURL = UserDefaults.standard.string(forKey: postProcessingBaseURLStorageKey) ?? ""
+
+        let resolvedCtxApiKey = contextAnalysisApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? apiKey : contextAnalysisApiKey
+        let resolvedCtxBaseURL = contextAnalysisBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? apiBaseURL : contextAnalysisBaseURL
+        let resolvedCtxModel = contextAnalysisModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.defaultPostProcessingModel : contextAnalysisModel
+
         let initialAccessibility = AXIsProcessTrusted()
         let initialScreenCapturePermission = CGPreflightScreenCaptureAccess()
         var removedAudioFileNames: [String] = []
@@ -335,7 +434,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         let selectedMicrophoneID = UserDefaults.standard.string(forKey: selectedMicrophoneStorageKey) ?? "default"
 
-        self.contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt, model: postProcessingModel)
+        self.contextService = AppContextService(apiKey: resolvedCtxApiKey, baseURL: resolvedCtxBaseURL, customContextPrompt: customContextPrompt, model: resolvedCtxModel)
         self.hasCompletedSetup = hasCompletedSetup
         self.apiKey = apiKey
         self.apiBaseURL = apiBaseURL
@@ -353,6 +452,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.forceHTTP2Transcription = forceHTTP2Transcription
         self.soundVolume = soundVolume
         self.postProcessingModel = postProcessingModel
+        self.transcriptionApiKey = transcriptionApiKey
+        self.transcriptionBaseURL = transcriptionBaseURL
+        self.transcriptionModel = transcriptionModel
+        self.contextAnalysisApiKey = contextAnalysisApiKey
+        self.contextAnalysisBaseURL = contextAnalysisBaseURL
+        self.contextAnalysisModel = contextAnalysisModel
+        self.postProcessingApiKey = postProcessingApiKey
+        self.postProcessingBaseURL = postProcessingBaseURL
         self.enableContextGathering = enableContextGathering
         self.pipelineHistory = savedHistory
         self.hasAccessibility = initialAccessibility
@@ -377,8 +484,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    deinit {
+    func cleanupBeforeDeallocation() {
         removeAudioDeviceListener()
+        accessibilityTimer?.invalidate()
+        accessibilityTimer = nil
+        debugOverlayTimer?.invalidate()
+        debugOverlayTimer = nil
+        transcribingIndicatorTask?.cancel()
+        contextCaptureTask?.cancel()
+        pendingShortcutStartTask?.cancel()
+        startupTimeoutTask?.cancel()
     }
 
     private func removeAudioDeviceListener() {
@@ -397,7 +512,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         audioDeviceListenerBlock = nil
     }
 
-    private static func loadStoredAPIKey(account: String) -> String {
+    nonisolated private static func loadStoredAPIKey(account: String) -> String {
         if let storedKey = AppSettingsStorage.load(account: account), !storedKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return storedKey
         }
@@ -413,7 +528,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private static let defaultAPIBaseURL = "https://api.groq.com/openai/v1"
+    private nonisolated static let defaultAPIBaseURL = "https://api.groq.com/openai/v1"
 
     private struct StoredShortcutConfiguration {
         let hold: ShortcutBinding
@@ -421,14 +536,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let didMigrateLegacyValue: Bool
     }
 
-    private static func loadStoredAPIBaseURL(account: String) -> String {
+    nonisolated private static func loadStoredAPIBaseURL(account: String) -> String {
         if let stored = AppSettingsStorage.load(account: account), !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return stored
         }
         return defaultAPIBaseURL
     }
 
-    private static func loadShortcutConfiguration(holdKey: String, toggleKey: String) -> StoredShortcutConfiguration {
+    nonisolated private static func loadShortcutConfiguration(holdKey: String, toggleKey: String) -> StoredShortcutConfiguration {
         if let hold = loadShortcut(forKey: holdKey),
            let toggle = loadShortcut(forKey: toggleKey) {
             return StoredShortcutConfiguration(hold: hold, toggle: toggle, didMigrateLegacyValue: false)
@@ -442,7 +557,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return StoredShortcutConfiguration(hold: hold, toggle: toggle, didMigrateLegacyValue: true)
     }
 
-    private static func loadShortcut(forKey key: String) -> ShortcutBinding? {
+    nonisolated private static func loadShortcut(forKey key: String) -> ShortcutBinding? {
         guard let data = UserDefaults.standard.data(forKey: key) else {
             return nil
         }
@@ -454,6 +569,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         if trimmed.isEmpty || trimmed == Self.defaultAPIBaseURL {
             AppSettingsStorage.delete(account: apiBaseURLStorageKey)
         } else {
+            guard URL(string: trimmed) != nil else {
+                os_log(.error, "Rejecting invalid API base URL: %{public}@", trimmed)
+                return
+            }
             AppSettingsStorage.save(trimmed, account: apiBaseURLStorageKey)
         }
     }
@@ -476,8 +595,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let fileURL: URL
     }
 
-    static func audioStorageDirectory() -> URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    nonisolated static func audioStorageDirectory() -> URL {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return FileManager.default.temporaryDirectory
+        }
         let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "FreeFlow"
         let audioDir = appSupport.appendingPathComponent("\(appName)/audio", isDirectory: true)
         if !FileManager.default.fileExists(atPath: audioDir.path) {
@@ -486,7 +607,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return audioDir
     }
 
-    static func saveAudioFile(from tempURL: URL) -> SavedAudioFile? {
+    nonisolated static func saveAudioFile(from tempURL: URL) -> SavedAudioFile? {
         let fileName = UUID().uuidString + ".wav"
         let destURL = audioStorageDirectory().appendingPathComponent(fileName)
         do {
@@ -497,7 +618,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private static func deleteAudioFile(_ fileName: String) {
+    nonisolated private static func deleteAudioFile(_ fileName: String) {
         let fileURL = audioStorageDirectory().appendingPathComponent(fileName)
         try? FileManager.default.removeItem(at: fileURL)
     }
@@ -552,11 +673,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
 
         let transcriptionService = TranscriptionService(
-            apiKey: apiKey,
-            baseURL: apiBaseURL,
-            forceHTTP2: forceHTTP2Transcription
+            apiKey: resolvedTranscriptionApiKey,
+            baseURL: resolvedTranscriptionBaseURL,
+            forceHTTP2: forceHTTP2Transcription,
+            model: resolvedTranscriptionModel
         )
-        let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL, model: postProcessingModel)
+        let postProcessingService = PostProcessingService(apiKey: resolvedPostProcessingApiKey, baseURL: resolvedPostProcessingBaseURL, model: resolvedPostProcessingModel)
         let capturedCustomVocabulary = customVocabulary
         let capturedCustomSystemPrompt = customSystemPrompt
 
@@ -627,7 +749,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     do {
                         try pipelineHistoryStore.update(updatedItem)
                         pipelineHistory = pipelineHistoryStore.loadAllHistory()
-                    } catch {}
+                    } catch {
+                        os_log(.error, "Failed to update pipeline history on retry failure: %{public}@", "\(error)")
+                    }
                     retryingItemIDs.remove(item.id)
                 }
             }
@@ -1024,14 +1148,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
+        let recorder = self.audioRecorder
+        Task.detached(priority: .userInitiated) { [weak self] in
             let t0 = CFAbsoluteTimeGetCurrent()
             do {
                 os_log(.info, log: recordingLog, "recorder startup entered")
-                try self.audioRecorder.startRecording(deviceUID: deviceUID)
+                try recorder.startRecording(deviceUID: deviceUID)
                 os_log(.info, log: recordingLog, "audioRecorder.startRecording() done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
-                DispatchQueue.main.async {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     self.startContextCapture()
                     self.audioLevelCancellable = self.audioRecorder.$audioLevel
                         .receive(on: DispatchQueue.main)
@@ -1040,7 +1165,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         }
                 }
             } catch {
-                DispatchQueue.main.async {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     initTimer.cancel()
                     self.startupTimeoutTask?.cancel()
                     self.startupTimeoutTask = nil
@@ -1176,15 +1302,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 await MainActor.run { [weak self] in
                     self?.overlayManager.showTranscribing()
                 }
-            } catch {}
+            } catch { /* CancellationError from Task.sleep — expected */ }
         }
 
         let transcriptionService = TranscriptionService(
-            apiKey: apiKey,
-            baseURL: apiBaseURL,
-            forceHTTP2: forceHTTP2Transcription
+            apiKey: resolvedTranscriptionApiKey,
+            baseURL: resolvedTranscriptionBaseURL,
+            forceHTTP2: forceHTTP2Transcription,
+            model: resolvedTranscriptionModel
         )
-        let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL, model: postProcessingModel)
+        let postProcessingService = PostProcessingService(apiKey: resolvedPostProcessingApiKey, baseURL: resolvedPostProcessingBaseURL, model: resolvedPostProcessingModel)
 
         Task {
             do {
@@ -1195,14 +1322,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 let contextGatheringEnabled = self.enableContextGathering
 
                 async let transcriptResult = transcriptionService.transcribe(fileURL: transcriptionFileURL)
-                async let contextResult: AppContext? = {
+                async let contextResult: AppContext? = { [weak self] () async -> AppContext? in
                     guard contextGatheringEnabled else { return nil }
                     if let sessionContext {
                         return sessionContext
                     } else if let ctx = await inFlightContextTask?.value {
                         return ctx
                     } else {
-                        return fallbackContextAtStop()
+                        return await self?.fallbackContextAtStop()
                     }
                 }()
 
@@ -1261,8 +1388,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     } else {
                         self.statusText = completionStatusText
                         self.overlayManager.showDone()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                            self.overlayManager.dismiss()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+                            self?.overlayManager.dismiss()
                         }
 
                         let pendingClipboardRestore = self.writeTranscriptToPasteboard(trimmedFinalTranscript)
@@ -1273,9 +1400,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
                     self.audioRecorder.cleanup()
 
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                        if self.statusText == completionStatusText || self.statusText == "Nothing to transcribe" {
-                            self.statusText = "Ready"
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                        if self?.statusText == completionStatusText || self?.statusText == "Nothing to transcribe" {
+                            self?.statusText = "Ready"
                         }
                     }
                 }
@@ -1535,11 +1662,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         debugOverlayTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             phase += 0.15
-            // Generate a fake audio level that oscillates like speech
             let base = 0.3 + 0.2 * sin(phase)
             let noise = Float.random(in: -0.15...0.15)
             let level = min(max(Float(base) + noise, 0.0), 1.0)
-            self.overlayManager.updateAudioLevel(level)
+            MainActor.assumeIsolated {
+                self.overlayManager.updateAudioLevel(level)
+            }
         }
     }
 
@@ -1581,7 +1709,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func restoreClipboardIfNeeded(_ pendingRestore: PendingClipboardRestore?) {
         guard let pendingRestore else { return }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + clipboardRestoreDelay) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + clipboardRestoreDelay) { [weak self] in
+            guard self != nil else { return }
             let pasteboard = NSPasteboard.general
             guard pasteboard.changeCount == pendingRestore.expectedChangeCount else { return }
             pendingRestore.snapshot.restore(to: pasteboard)

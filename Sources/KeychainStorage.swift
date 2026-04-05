@@ -5,7 +5,9 @@ enum AppSettingsStorage {
     private static let bundleID = Bundle.main.bundleIdentifier ?? "com.zachlatta.freeflow"
 
     private static var storageDirectory: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return FileManager.default.temporaryDirectory
+        }
         let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "FreeFlow"
         let dir = appSupport.appendingPathComponent(appName, isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {

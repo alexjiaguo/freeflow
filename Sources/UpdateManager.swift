@@ -71,7 +71,7 @@ final class UpdateManager: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "updateSkippedVersion") }
     }
 
-    private let releasesURL = URL(string: "https://api.github.com/repos/zachlatta/freeflow/releases/latest")!
+    private let releasesURL = URL(string: "https://api.github.com/repos/zachlatta/freeflow/releases/latest")! // safe: hardcoded valid URL
     private let stabilityBufferDays: TimeInterval = 3
     private let checkIntervalSeconds: TimeInterval = 7 * 24 * 60 * 60 // 7 days
     private var periodicTimer: Timer?

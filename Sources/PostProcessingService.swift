@@ -67,9 +67,10 @@ Then your response would be ONLY the cleaned up text, so here your response is O
         customSystemPrompt: String = ""
     ) async throws -> PostProcessingResult {
         let vocabularyTerms = mergedVocabularyTerms(rawVocabulary: customVocabulary)
+        let resolvedModel = model
 
         let timeoutSeconds = postProcessingTimeoutSeconds
-        return try await withThrowingTaskGroup(of: PostProcessingResult.self) { group in
+        return try await withThrowingTaskGroup(of: PostProcessingResult.self) { [weak self] group in
             group.addTask { [weak self] in
                 guard let self else {
                     throw PostProcessingError.invalidResponse("Post-processing service deallocated")
@@ -77,7 +78,7 @@ Then your response would be ONLY the cleaned up text, so here your response is O
                 return try await self.process(
                     transcript: transcript,
                     contextSummary: context?.contextSummary,
-                    model: self.model,
+                    model: resolvedModel,
                     customVocabulary: vocabularyTerms,
                     customSystemPrompt: customSystemPrompt
                 )
@@ -193,7 +194,10 @@ Model: \(model)
         customVocabulary: [String],
         customSystemPrompt: String = ""
     ) async throws -> PostProcessingResult {
-        var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
+        guard let url = URL(string: "\(baseURL)/chat/completions") else {
+            throw PostProcessingError.invalidResponse("Invalid API base URL: \(baseURL)")
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

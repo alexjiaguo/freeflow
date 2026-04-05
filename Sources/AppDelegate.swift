@@ -1,9 +1,11 @@
 import SwiftUI
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     var setupWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private var settingsWindowCloseObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NotificationCenter.default.addObserver(
@@ -81,12 +83,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         settingsWindow = window
 
-        NotificationCenter.default.addObserver(
+        if let existingObserver = settingsWindowCloseObserver {
+            NotificationCenter.default.removeObserver(existingObserver)
+        }
+        settingsWindowCloseObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: window,
             queue: .main
         ) { [weak self] _ in
-            self?.settingsWindow = nil
+            MainActor.assumeIsolated {
+                self?.settingsWindow = nil
+            }
         }
     }
 

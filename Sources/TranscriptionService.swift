@@ -8,15 +8,18 @@ class TranscriptionService {
     private let apiKey: String
     private let baseURL: String
     private let forceHTTP2: Bool
-    private let transcriptionModel = "whisper-large-v3"
+    private let transcriptionModel: String
     private let transcriptionTimeoutSeconds: TimeInterval = 20
     private let uploadSampleRate = 16_000.0
     private let uploadChannelCount: AVAudioChannelCount = 1
 
-    init(apiKey: String, baseURL: String = "https://api.groq.com/openai/v1", forceHTTP2: Bool = false) {
+    init(apiKey: String, baseURL: String = "https://api.groq.com/openai/v1", forceHTTP2: Bool = false, model: String = "whisper-large-v3") {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.forceHTTP2 = forceHTTP2
+        self.transcriptionModel = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "whisper-large-v3"
+            : model.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // Validate API key by hitting a lightweight endpoint
@@ -24,7 +27,8 @@ class TranscriptionService {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
 
-        var request = URLRequest(url: URL(string: "\(baseURL)/models")!)
+        guard let url = URL(string: "\(baseURL)/models") else { return false }
+        var request = URLRequest(url: url)
         request.setValue("Bearer \(trimmed)", forHTTPHeaderField: "Authorization")
 
         do {
@@ -38,6 +42,7 @@ class TranscriptionService {
 
     // Upload audio file, submit for transcription, poll until done, return text
     func transcribe(fileURL: URL) async throws -> String {
+        let timeoutSeconds = transcriptionTimeoutSeconds
         return try await withThrowingTaskGroup(of: String.self) { group in
             group.addTask { [weak self] in
                 guard let self else {
@@ -47,15 +52,20 @@ class TranscriptionService {
             }
 
             group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(self.transcriptionTimeoutSeconds * 1_000_000_000))
-                throw TranscriptionError.transcriptionTimedOut(self.transcriptionTimeoutSeconds)
+                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
+                throw TranscriptionError.transcriptionTimedOut(timeoutSeconds)
             }
 
-            guard let result = try await group.next() else {
-                throw TranscriptionError.submissionFailed("No transcription result")
+            do {
+                guard let result = try await group.next() else {
+                    throw TranscriptionError.submissionFailed("No transcription result")
+                }
+                group.cancelAll()
+                return result
+            } catch {
+                group.cancelAll()
+                throw error
             }
-            group.cancelAll()
-            return result
         }
     }
 
@@ -71,7 +81,9 @@ class TranscriptionService {
     }
 
     private func transcribeAudioWithURLSession(fileURL: URL) async throws -> String {
-        let url = URL(string: "\(baseURL)/audio/transcriptions")!
+        guard let url = URL(string: "\(baseURL)/audio/transcriptions") else {
+            throw TranscriptionError.submissionFailed("Invalid API base URL: \(baseURL)")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

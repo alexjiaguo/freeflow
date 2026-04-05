@@ -6,6 +6,7 @@ final class HotkeyManager {
     private var localKeyUpMonitor: Any?
     private var eventTap: CFMachPort?
     private var eventTapRunLoopSource: CFRunLoopSource?
+    private var retainedSelf: Unmanaged<HotkeyManager>?
 
     private var configuration = ShortcutConfiguration(
         hold: .defaultHold,
@@ -39,6 +40,8 @@ final class HotkeyManager {
             CFMachPortInvalidate(tap)
         }
         eventTap = nil
+        retainedSelf?.release()
+        retainedSelf = nil
         pressedKeyCodes.removeAll()
         pressedModifierKeyCodes.removeAll()
         holdIsActive = false
@@ -92,16 +95,19 @@ final class HotkeyManager {
             return manager.handleEventTap(type: type, event: event)
         }
 
+        let retained = Unmanaged.passRetained(self)
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
             callback: callback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
+            userInfo: retained.toOpaque()
         ) else {
+            retained.release()
             return
         }
+        retainedSelf = retained
 
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)

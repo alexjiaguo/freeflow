@@ -1,9 +1,13 @@
 import Foundation
 import CoreData
+import os.log
+
+private let historyLog = OSLog(subsystem: Bundle.main.bundleIdentifier ?? "com.zachlatta.freeflow", category: "PipelineHistory")
 
 final class PipelineHistoryStore {
     private let container: NSPersistentContainer
     private let isStoreLoaded: Bool
+    private(set) var isUsingInMemoryFallback = false
 
     init() {
         let model = Self.makeModel()
@@ -48,7 +52,7 @@ final class PipelineHistoryStore {
             if Self.loadPersistentStoresSynchronously(container: container) == nil {
                 isStoreLoaded = true
             } else {
-                print("[PipelineHistoryStore] Failed to recover persistent store. Falling back to in-memory history.")
+                os_log(.error, log: historyLog, "Failed to recover persistent store. Falling back to in-memory history — transcription history will not persist across restarts.")
                 let coordinator = container.persistentStoreCoordinator
                 for store in coordinator.persistentStores {
                     try? coordinator.remove(store)
@@ -57,6 +61,7 @@ final class PipelineHistoryStore {
                 description.type = NSInMemoryStoreType
                 container.persistentStoreDescriptions = [description]
                 isStoreLoaded = Self.loadPersistentStoresSynchronously(container: container) == nil
+                isUsingInMemoryFallback = true
             }
         }
     }

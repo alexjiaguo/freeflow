@@ -128,7 +128,7 @@ class AudioRecorder: NSObject, ObservableObject {
     private let didEncounterRecordingFailure = OSAllocatedUnfairLock(initialState: false)
     private var recordingStartTime: CFAbsoluteTime = 0
     private var firstBufferLogged = false
-    private var bufferCount: Int = 0
+    private let _bufferCount = OSAllocatedUnfairLock(initialState: 0)
     private var currentDeviceUID: String?
     private var storedInputFormat: AVAudioFormat?
 
@@ -146,9 +146,9 @@ class AudioRecorder: NSObject, ObservableObject {
         let t0 = CFAbsoluteTimeGetCurrent()
         recordingStartTime = t0
         firstBufferLogged = false
-        bufferCount = 0
         readyFired = false
         didEncounterRecordingFailure.withLock { $0 = false }
+        _bufferCount.withLock { $0 = 0 }
 
         os_log(.info, log: recordingLog, "startRecording() entered")
 
@@ -173,7 +173,9 @@ class AudioRecorder: NSObject, ObservableObject {
             if let uid = deviceUID, !uid.isEmpty, uid != "default",
                let deviceID = AudioDevice.deviceID(forUID: uid) {
                 os_log(.info, log: recordingLog, "device lookup resolved to %d: %.3fms", deviceID, (CFAbsoluteTimeGetCurrent() - t0) * 1000)
-                let inputUnit = engine.inputNode.audioUnit!
+                guard let inputUnit = engine.inputNode.audioUnit else {
+                    throw AudioRecorderError.invalidInputFormat("Audio unit not available on input node")
+                }
                 var id = deviceID
                 AudioUnitSetProperty(
                     inputUnit,
@@ -215,7 +217,10 @@ class AudioRecorder: NSObject, ObservableObject {
 
                 guard self._recording.withLock({ $0 }) else { return }
 
-                self.bufferCount += 1
+                let currentBufferCount = self._bufferCount.withLock { count -> Int in
+                    count += 1
+                    return count
+                }
 
                 // Check if this buffer has real audio
                 var rms: Float = 0
@@ -227,9 +232,9 @@ class AudioRecorder: NSObject, ObservableObject {
                     rms = sqrtf(sum / Float(frames))
                 }
 
-                if self.bufferCount <= 40 {
+                if currentBufferCount <= 40 {
                     let elapsed = (CFAbsoluteTimeGetCurrent() - self.recordingStartTime) * 1000
-                    os_log(.info, log: recordingLog, "buffer #%d at %.3fms, frames=%d, rms=%.6f", self.bufferCount, elapsed, buffer.frameLength, rms)
+                    os_log(.info, log: recordingLog, "buffer #%d at %.3fms, frames=%d, rms=%.6f", currentBufferCount, elapsed, buffer.frameLength, rms)
                 }
 
                 // Fire ready callback on first non-silent buffer
@@ -320,12 +325,16 @@ class AudioRecorder: NSObject, ObservableObject {
     }
 
     func stopRecording() -> URL? {
+        let finalBufferCount = _bufferCount.withLock { $0 }
         let elapsed = (CFAbsoluteTimeGetCurrent() - recordingStartTime) * 1000
-        os_log(.info, log: recordingLog, "stopRecording() called: %.3fms after start, %d buffers received", elapsed, bufferCount)
+        os_log(.info, log: recordingLog, "stopRecording() called: %.3fms after start, %d buffers received", elapsed, finalBufferCount)
 
         _recording.withLock { $0 = false }
         audioEngine?.inputNode.removeTap(onBus: 0)
-        inFlightTapCallbacks.wait()
+        let waitResult = inFlightTapCallbacks.wait(timeout: .now() + 2.0)
+        if waitResult == .timedOut {
+            os_log(.error, log: recordingLog, "inFlightTapCallbacks.wait() timed out after 2s — proceeding with stop")
+        }
         audioEngine?.stop()
         do {
             try writeCoordinator.finish()
