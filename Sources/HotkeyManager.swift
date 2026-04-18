@@ -22,6 +22,11 @@ final class HotkeyManager {
     private var toggleIsActive = false
 
     var onShortcutEvent: ((ShortcutEvent) -> Void)?
+    var onEscapeKeyPressed: (() -> Bool)?
+
+    var currentPressedModifiers: ShortcutModifiers {
+        currentModifiers
+    }
 
     func start(configuration: ShortcutConfiguration) {
         stop()
@@ -195,6 +200,11 @@ final class HotkeyManager {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
+        if event.keyCode == 53 {
+            guard !event.isARepeat else { return false }
+            return onEscapeKeyPressed?() ?? false
+        }
+
         guard !ShortcutBinding.modifierKeyCodes.contains(event.keyCode) else { return false }
 
         let shouldConsumeBefore = shouldConsumeKeyEvent(
