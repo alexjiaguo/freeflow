@@ -808,8 +808,50 @@ struct GeneralSettingsView: View {
                     appState.requestScreenCapturePermission()
                 }
             )
+
+            Divider()
+                .padding(.vertical, 4)
+
+            HStack {
+                Label("Shortcut Monitoring", systemImage: "keyboard")
+                Spacer()
+                if appState.isHotkeyMonitoringActive {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 8, height: 8)
+                        Text("Active")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                } else {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 8, height: 8)
+                        Text("Inactive")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+                
+                Button("Reset") {
+                    appState.forceResetHotkeyMonitoring()
+                }
+                .font(.caption)
+                .controlSize(.small)
+            }
+            .padding(10)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
+            .cornerRadius(6)
+
+            Text("If shortcuts aren't working despite permissions being granted, try clicking Reset or toggling Accessibility permissions in System Settings.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
         }
     }
+
 
     private func permissionRow(title: String, icon: String, granted: Bool, action: @escaping () -> Void) -> some View {
         HStack {

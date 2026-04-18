@@ -8,3 +8,5 @@ build/
 .mcp.json
 CLAUDE.md
 docs/
+.build/
+.build/

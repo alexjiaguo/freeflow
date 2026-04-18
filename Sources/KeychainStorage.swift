@@ -23,8 +23,10 @@ enum AppSettingsStorage {
     // MARK: - Public API
 
     static func load(account: String) -> String? {
-        migrateFromKeychainIfNeeded(account: account)
-        let dict = loadSettings()
+        var dict = loadSettings()
+        if dict[migrationDoneKey] == nil {
+            performMigration(account: account, settings: &dict)
+        }
         return dict[account]
     }
 
@@ -67,24 +69,16 @@ enum AppSettingsStorage {
 
     private static let migrationDoneKey = "keychain_migration_done"
 
-    private static func migrateFromKeychainIfNeeded(account: String) {
-        let dict = loadSettings()
-        if dict[migrationDoneKey] != nil { return }
-
-        // Try to load from Keychain
+    private static func performMigration(account: String, settings dict: inout [String: String]) {
         if let keychainValue = loadFromKeychain(account: account),
            !keychainValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            var updated = dict
-            updated[account] = keychainValue
-            updated[migrationDoneKey] = "true"
-            writeSettings(updated)
-            // Clean up old keychain entry
+            dict[account] = keychainValue
+            dict[migrationDoneKey] = "true"
+            writeSettings(dict)
             deleteFromKeychain(account: account)
         } else {
-            // Mark migration as done even if nothing was in Keychain
-            var updated = dict
-            updated[migrationDoneKey] = "true"
-            writeSettings(updated)
+            dict[migrationDoneKey] = "true"
+            writeSettings(dict)
         }
     }
 

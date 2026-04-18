@@ -1,4 +1,8 @@
 import Cocoa
+import os.log
+
+private let hotkeyLog = OSLog(subsystem: "com.zachlatta.freeflow", category: "HotkeyManager")
+
 
 final class HotkeyManager {
     private var localFlagsMonitor: Any?
@@ -72,7 +76,12 @@ final class HotkeyManager {
         }
     }
 
+    var isEventTapActive: Bool {
+        eventTap != nil
+    }
+
     var hasPressedShortcutInputs: Bool {
+
         pressedKeyCodes.contains(where: shortcutReferencesKeyCode)
             || pressedModifierKeyCodes.contains(where: shortcutReferencesModifierKeyCode)
     }
@@ -104,9 +113,12 @@ final class HotkeyManager {
             callback: callback,
             userInfo: retained.toOpaque()
         ) else {
+            os_log(.error, log: hotkeyLog, "Failed to create event tap. Accessibility permissions might be missing.")
             retained.release()
             return
         }
+        os_log(.info, log: hotkeyLog, "Event tap installed successfully.")
+
         retainedSelf = retained
 
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
@@ -120,14 +132,23 @@ final class HotkeyManager {
     private func handleEventTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            os_log(.error, log: hotkeyLog, "Event tap disabled (type: %d). Re-enabling...", type.rawValue)
+
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
             return Unmanaged.passUnretained(event)
+
         case .flagsChanged, .keyDown, .keyUp:
             guard let nsEvent = NSEvent(cgEvent: event) else {
                 return Unmanaged.passUnretained(event)
             }
+
+            // Diagnostic: Log all key events received by the tap if they might be shortcuts
+            if nsEvent.type == .flagsChanged || nsEvent.type == .keyDown || nsEvent.type == .keyUp {
+                 os_log(.debug, log: hotkeyLog, "Event tap received: type=%d, keyCode=%d", type.rawValue, nsEvent.keyCode)
+            }
+
 
             let shouldConsume: Bool
             switch type {

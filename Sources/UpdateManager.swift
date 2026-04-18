@@ -330,55 +330,8 @@ final class UpdateManager: ObservableObject {
             var request = URLRequest(url: downloadURL)
             request.cachePolicy = .reloadIgnoringLocalCacheData
 
-            let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
-
-            let totalSize = (response as? HTTPURLResponse)
-                .flatMap { Int($0.value(forHTTPHeaderField: "Content-Length") ?? "") }
-                ?? expectedSize
-
-            let outputHandle = try FileHandle(forWritingTo: {
-                fm.createFile(atPath: dmgPath.path, contents: nil)
-                return dmgPath
-            }())
-
-            // Run the byte-iteration and file I/O off the main thread
-            let mgr = self
-            let downloadTask = Task.detached {
-                var receivedBytes = 0
-                let bufferSize = 65_536
-                var buffer = Data()
-                buffer.reserveCapacity(bufferSize)
-                var lastProgressUpdate = CFAbsoluteTimeGetCurrent()
-
-                for try await byte in asyncBytes {
-                    try Task.checkCancellation()
-                    buffer.append(byte)
-                    if buffer.count >= bufferSize {
-                        outputHandle.write(buffer)
-                        receivedBytes += buffer.count
-                        buffer.removeAll(keepingCapacity: true)
-
-                        // Throttle progress updates to ~30fps
-                        let now = CFAbsoluteTimeGetCurrent()
-                        if totalSize > 0 && (now - lastProgressUpdate) >= 0.033 {
-                            lastProgressUpdate = now
-                            let progress = Double(receivedBytes) / Double(totalSize)
-                            await MainActor.run {
-                                mgr.downloadProgress = progress
-                            }
-                        }
-                    }
-                }
-
-                // Write remaining bytes
-                if !buffer.isEmpty {
-                    outputHandle.write(buffer)
-                    receivedBytes += buffer.count
-                }
-                try outputHandle.close()
-            }
-
-            try await downloadTask.value
+            let (downloadedURL, _) = try await URLSession.shared.download(for: request)
+            try fm.moveItem(at: downloadedURL, to: dmgPath)
             downloadProgress = 1.0
 
         } catch is CancellationError {

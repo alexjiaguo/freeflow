@@ -9,6 +9,8 @@ import ScreenCaptureKit
 import os.log
 
 private let recordingLog = OSLog(subsystem: "com.zachlatta.freeflow", category: "Recording")
+private let hotkeyLog = OSLog(subsystem: "com.zachlatta.freeflow", category: "HotkeyManager")
+
 
 enum SettingsTab: String, CaseIterable, Identifiable {
     case general
@@ -723,7 +725,9 @@ final class AppState: ObservableObject {
                     )
                     do {
                         try pipelineHistoryStore.update(updatedItem)
-                        pipelineHistory = pipelineHistoryStore.loadAllHistory()
+                        if let idx = pipelineHistory.firstIndex(where: { $0.id == updatedItem.id }) {
+                            pipelineHistory[idx] = updatedItem
+                        }
                     } catch {
                         errorMessage = "Failed to save retry result: \(error.localizedDescription)"
                     }
@@ -748,7 +752,9 @@ final class AppState: ObservableObject {
                     )
                     do {
                         try pipelineHistoryStore.update(updatedItem)
-                        pipelineHistory = pipelineHistoryStore.loadAllHistory()
+                        if let idx = pipelineHistory.firstIndex(where: { $0.id == updatedItem.id }) {
+                            pipelineHistory[idx] = updatedItem
+                        }
                     } catch {
                         os_log(.error, "Failed to update pipeline history on retry failure: %{public}@", "\(error)")
                     }
@@ -940,7 +946,12 @@ final class AppState: ObservableObject {
         restartHotkeyMonitoring()
     }
 
+    var isHotkeyMonitoringActive: Bool {
+        hotkeyManager.isEventTapActive
+    }
+
     private func restartHotkeyMonitoring() {
+
         guard shouldMonitorHotkeys, !isCapturingShortcut else {
             hotkeyManager.stop()
             return
@@ -949,10 +960,18 @@ final class AppState: ObservableObject {
         hotkeyManager.start(configuration: ShortcutConfiguration(hold: holdShortcut, toggle: toggleShortcut))
     }
 
+    func forceResetHotkeyMonitoring() {
+        os_log(.info, log: hotkeyLog, "Force resetting hotkey monitoring...")
+        stopHotkeyMonitoring()
+        startHotkeyMonitoring()
+    }
+
     private func handleShortcutEvent(_ event: ShortcutEvent) {
+        os_log(.debug, log: hotkeyLog, "handleShortcutEvent called with: %{public}@", String(describing: event))
         guard let action = shortcutSessionController.handle(event: event, isTranscribing: isTranscribing) else {
             return
         }
+
 
         switch action {
         case .start(let mode):
@@ -1274,46 +1293,55 @@ final class AppState: ObservableObject {
         lastContextScreenshotDataURL = nil
         lastContextScreenshotStatus = "No screenshot"
 
-        guard let fileURL = audioRecorder.stopRecording() else {
-            audioRecorder.cleanup()
-            errorMessage = "No audio recorded"
-            isRecording = false
-            statusText = "Error"
-            overlayManager.dismiss()
-            return
-        }
-        let savedAudioFile = Self.saveAudioFile(from: fileURL)
-        let transcriptionFileURL = savedAudioFile?.fileURL ?? fileURL
-        isRecording = false
-        isTranscribing = true
-        statusText = "Transcribing..."
-        debugStatusMessage = "Transcribing audio"
-        errorMessage = nil
-        let s = NSSound(named: "Pop"); s?.volume = soundVolume; s?.play()
-        overlayManager.slideUpToNotch { }
-
-        transcribingIndicatorTask?.cancel()
-        let indicatorDelay = transcribingIndicatorDelay
-        transcribingIndicatorTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: UInt64(indicatorDelay * 1_000_000_000))
-                let shouldShowTranscribing = self?.isTranscribing ?? false
-                guard shouldShowTranscribing else { return }
-                await MainActor.run { [weak self] in
-                    self?.overlayManager.showTranscribing()
-                }
-            } catch { /* CancellationError from Task.sleep — expected */ }
-        }
-
-        let transcriptionService = TranscriptionService(
-            apiKey: resolvedTranscriptionApiKey,
-            baseURL: resolvedTranscriptionBaseURL,
-            forceHTTP2: forceHTTP2Transcription,
-            model: resolvedTranscriptionModel
-        )
-        let postProcessingService = PostProcessingService(apiKey: resolvedPostProcessingApiKey, baseURL: resolvedPostProcessingBaseURL, model: resolvedPostProcessingModel)
+        let recorder = audioRecorder
+        let capturedSoundVolume = soundVolume
 
         Task {
+            let stopResult = await Task.detached(priority: .userInitiated) { () -> (fileURL: URL?, savedAudioFile: AppState.SavedAudioFile?) in
+                let url = recorder.stopRecording()
+                let saved = url.flatMap { AppState.saveAudioFile(from: $0) }
+                return (url, saved)
+            }.value
+
+            guard let fileURL = stopResult.fileURL else {
+                recorder.cleanup()
+                self.errorMessage = "No audio recorded"
+                self.isRecording = false
+                self.statusText = "Error"
+                self.overlayManager.dismiss()
+                return
+            }
+            let savedAudioFile = stopResult.savedAudioFile
+            let transcriptionFileURL = savedAudioFile?.fileURL ?? fileURL
+            self.isRecording = false
+            self.isTranscribing = true
+            self.statusText = "Transcribing..."
+            self.debugStatusMessage = "Transcribing audio"
+            self.errorMessage = nil
+            let s = NSSound(named: "Pop"); s?.volume = capturedSoundVolume; s?.play()
+            self.overlayManager.slideUpToNotch { }
+
+            self.transcribingIndicatorTask?.cancel()
+            let indicatorDelay = self.transcribingIndicatorDelay
+            self.transcribingIndicatorTask = Task { [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(indicatorDelay * 1_000_000_000))
+                    let shouldShowTranscribing = self?.isTranscribing ?? false
+                    guard shouldShowTranscribing else { return }
+                    await MainActor.run { [weak self] in
+                        self?.overlayManager.showTranscribing()
+                    }
+                } catch { /* CancellationError from Task.sleep — expected */ }
+            }
+
+            let transcriptionService = TranscriptionService(
+                apiKey: self.resolvedTranscriptionApiKey,
+                baseURL: self.resolvedTranscriptionBaseURL,
+                forceHTTP2: self.forceHTTP2Transcription,
+                model: self.resolvedTranscriptionModel
+            )
+            let postProcessingService = PostProcessingService(apiKey: self.resolvedPostProcessingApiKey, baseURL: self.resolvedPostProcessingBaseURL, model: self.resolvedPostProcessingModel)
+
             do {
                 // Run transcription and context resolution in parallel.
                 // Context may already be captured (sessionContext), still in-flight
@@ -1476,7 +1504,11 @@ final class AppState: ObservableObject {
             for audioFileName in removedAudioFileNames {
                 Self.deleteAudioFile(audioFileName)
             }
-            pipelineHistory = pipelineHistoryStore.loadAllHistory()
+            pipelineHistory.insert(newEntry, at: 0)
+            let maxCount = maxPipelineHistoryCount
+            if pipelineHistory.count > maxCount {
+                pipelineHistory = Array(pipelineHistory.prefix(maxCount))
+            }
         } catch {
             errorMessage = "Unable to save run history entry: \(error.localizedDescription)"
         }

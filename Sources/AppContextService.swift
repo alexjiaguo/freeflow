@@ -147,6 +147,7 @@ Return only two sentences, no labels, no markdown, no extra commentary.
             }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
+            request.timeoutInterval = 10
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -594,35 +595,48 @@ Selected text: \(selectedText ?? "None")
 
         let whiteThreshold: UInt8 = 245
         let alphaThreshold: UInt8 = 5
-        var minX = width
-        var minY = height
-        var maxX: Int = -1
-        var maxY: Int = -1
-        var hasContent = false
+        let step = 4
 
-        for y in 0..<height {
-            let rowOffset = y * bytesPerRow
-            for x in 0..<width {
-                let offset = rowOffset + x * bytesPerPixel
-                let r = pixelData[offset]
-                let g = pixelData[offset + 1]
-                let b = pixelData[offset + 2]
-                let a = pixelData[offset + 3]
-
-                if a <= alphaThreshold { continue }
-                if r >= whiteThreshold && g >= whiteThreshold && b >= whiteThreshold {
-                    continue
-                }
-
-                hasContent = true
-                minX = min(minX, x)
-                minY = min(minY, y)
-                maxX = max(maxX, x)
-                maxY = max(maxY, y)
-            }
+        func isContentPixel(at offset: Int) -> Bool {
+            let a = pixelData[offset + 3]
+            if a <= alphaThreshold { return false }
+            return pixelData[offset] < whiteThreshold
+                || pixelData[offset + 1] < whiteThreshold
+                || pixelData[offset + 2] < whiteThreshold
         }
 
-        guard hasContent else { return image }
+        func rowHasContent(_ y: Int) -> Bool {
+            let rowOffset = y * bytesPerRow
+            for x in stride(from: 0, to: width, by: step) {
+                if isContentPixel(at: rowOffset + x * bytesPerPixel) { return true }
+            }
+            return false
+        }
+
+        func columnHasContent(_ x: Int) -> Bool {
+            for y in stride(from: 0, to: height, by: step) {
+                if isContentPixel(at: y * bytesPerRow + x * bytesPerPixel) { return true }
+            }
+            return false
+        }
+
+        var minY = 0
+        while minY < height && !rowHasContent(minY) { minY += 1 }
+        guard minY < height else { return image }
+
+        var maxY = height - 1
+        while maxY > minY && !rowHasContent(maxY) { maxY -= 1 }
+
+        var minX = 0
+        while minX < width && !columnHasContent(minX) { minX += 1 }
+
+        var maxX = width - 1
+        while maxX > minX && !columnHasContent(maxX) { maxX -= 1 }
+
+        minX = max(0, minX - step)
+        minY = max(0, minY - step)
+        maxX = min(width - 1, maxX + step)
+        maxY = min(height - 1, maxY + step)
 
         let cropRect = CGRect(
             x: CGFloat(minX),

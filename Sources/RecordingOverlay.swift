@@ -84,66 +84,48 @@ final class RecordingOverlayManager {
     }
 
     func showInitializing(mode: RecordingTriggerMode = .hold) {
-        DispatchQueue.main.async {
-            self.overlayState.recordingTriggerMode = mode
-            self.overlayState.phase = .initializing
-            self.overlayState.audioLevel = 0
-            self.showOverlayPanel(animatedResize: false)
-        }
+        overlayState.recordingTriggerMode = mode
+        overlayState.phase = .initializing
+        overlayState.audioLevel = 0
+        showOverlayPanel(animatedResize: false)
     }
 
     func showRecording(mode: RecordingTriggerMode = .hold) {
-        DispatchQueue.main.async {
-            self.overlayState.recordingTriggerMode = mode
-            self.overlayState.phase = .recording
-            self.overlayState.audioLevel = 0
-            self.showOverlayPanel(animatedResize: true)
-        }
+        overlayState.recordingTriggerMode = mode
+        overlayState.phase = .recording
+        overlayState.audioLevel = 0
+        showOverlayPanel(animatedResize: true)
     }
 
     func transitionToRecording(mode: RecordingTriggerMode = .hold) {
-        DispatchQueue.main.async {
-            self.overlayState.recordingTriggerMode = mode
-            self.overlayState.phase = .recording
-            self.updateOverlayLayout(animated: true)
-        }
+        overlayState.recordingTriggerMode = mode
+        overlayState.phase = .recording
+        updateOverlayLayout(animated: true)
     }
 
     func setRecordingTriggerMode(_ mode: RecordingTriggerMode, animated: Bool) {
-        DispatchQueue.main.async {
-            self.overlayState.recordingTriggerMode = mode
-            self.updateOverlayLayout(animated: animated)
-        }
+        overlayState.recordingTriggerMode = mode
+        updateOverlayLayout(animated: animated)
     }
 
     func updateAudioLevel(_ level: Float) {
-        DispatchQueue.main.async {
-            self.overlayState.audioLevel = level
-        }
+        overlayState.audioLevel = level
     }
 
     func showTranscribing() {
-        DispatchQueue.main.async {
-            self.showTranscribingPanel()
-        }
+        showTranscribingPanel()
     }
 
     func slideUpToNotch(completion: @escaping () -> Void) {
-        DispatchQueue.main.async {
-            self.slideOverlayUp(completion: completion)
-        }
+        slideOverlayUp(completion: completion)
     }
 
     func showDone() {
-        DispatchQueue.main.async {
-            self.showDonePanel()
-        }
+        showDonePanel()
     }
 
     func dismiss() {
-        DispatchQueue.main.async {
-            self.dismissAll()
-        }
+        dismissAll()
     }
 
     private func showOverlayPanel(animatedResize: Bool) {
@@ -361,29 +343,17 @@ struct WaveformView: View {
 }
 
 struct InitializingDotsView: View {
-    @State private var activeDot = 0
-    @State private var timer: Timer?
-
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .fill(.white.opacity(activeDot == index ? 0.9 : 0.25))
-                    .frame(width: 4.5, height: 4.5)
-                    .animation(.easeInOut(duration: 0.4), value: activeDot)
-            }
-        }
-        .onAppear {
-            timer?.invalidate()
-            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-                DispatchQueue.main.async {
-                    activeDot = (activeDot + 1) % 3
+        TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
+            let phase = Int(timeline.date.timeIntervalSinceReferenceDate / 0.5) % 3
+            HStack(spacing: 4) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(.white.opacity(phase == index ? 0.9 : 0.25))
+                        .frame(width: 4.5, height: 4.5)
+                        .animation(.easeInOut(duration: 0.4), value: phase)
                 }
             }
-        }
-        .onDisappear {
-            timer?.invalidate()
-            timer = nil
         }
     }
 }
@@ -431,34 +401,18 @@ struct RecordingOverlayView: View {
 // MARK: - Transcribing Indicator
 
 struct TranscribingIndicatorView: View {
-    @State private var animatingDot = 0
-    @State private var dotAnimationTimer: Timer?
-
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .fill(.white.opacity(animatingDot == index ? 0.9 : 0.25))
-                    .frame(width: 4.5, height: 4.5)
-                    .animation(.easeInOut(duration: 0.4), value: animatingDot)
+        TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
+            let phase = Int(timeline.date.timeIntervalSinceReferenceDate / 0.5) % 3
+            HStack(spacing: 4) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(.white.opacity(phase == index ? 0.9 : 0.25))
+                        .frame(width: 4.5, height: 4.5)
+                        .animation(.easeInOut(duration: 0.4), value: phase)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { startDotAnimation() }
-        .onDisappear { stopDotAnimation() }
-    }
-
-    private func startDotAnimation() {
-        dotAnimationTimer?.invalidate()
-        dotAnimationTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            DispatchQueue.main.async {
-                animatingDot = (animatingDot + 1) % 3
-            }
-        }
-    }
-
-    private func stopDotAnimation() {
-        dotAnimationTimer?.invalidate()
-        dotAnimationTimer = nil
     }
 }

@@ -303,6 +303,7 @@ class AudioRecorder: NSObject, ObservableObject {
         }
         os_log(.info, log: recordingLog, "audio file created: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
 
+        try? writeCoordinator.finish()
         writeCoordinator.start(writer: AVAudioFileWriterAdapter(file: newAudioFile))
         _recording.withLock { $0 = true }
 
@@ -319,7 +320,7 @@ class AudioRecorder: NSObject, ObservableObject {
             throw error
         }
 
-        self.isRecording = true
+        DispatchQueue.main.async { self.isRecording = true }
 
         os_log(.info, log: recordingLog, "startRecording() complete: %.3fms total", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
     }
@@ -342,7 +343,7 @@ class AudioRecorder: NSObject, ObservableObject {
             didEncounterRecordingFailure.withLock { $0 = true }
             os_log(.error, log: recordingLog, "audio write failed during stop: %{public}@", String(describing: error))
         }
-        isRecording = false
+        DispatchQueue.main.async { self.isRecording = false }
         if didEncounterRecordingFailure.withLock({ $0 }) {
             smoothedLevel = 0.0
             DispatchQueue.main.async { self.audioLevel = 0.0 }
