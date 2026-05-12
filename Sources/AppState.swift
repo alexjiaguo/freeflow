@@ -222,6 +222,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let pressEnterVoiceCommandStorageKey = "press_enter_voice_command_enabled"
     private let alertSoundsEnabledStorageKey = "alert_sounds_enabled"
     private let soundVolumeStorageKey = "sound_volume"
+    private let enableContextGatheringStorageKey = "enable_context_gathering"
     private let voiceMacrosStorageKey = "voice_macros"
     private let commandModeEnabledStorageKey = "command_mode_enabled"
     private let commandModeStyleStorageKey = "command_mode_style"
@@ -496,6 +497,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var enableContextGathering: Bool {
+        didSet {
+            UserDefaults.standard.set(enableContextGathering, forKey: enableContextGatheringStorageKey)
+        }
+    }
+
     private var precomputedMacros: [PrecomputedMacro] = []
 
     @Published var voiceMacros: [VoiceMacro] = [] {
@@ -646,6 +653,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let alertSoundsEnabled = UserDefaults.standard.object(forKey: alertSoundsEnabledStorageKey) != nil
             ? UserDefaults.standard.bool(forKey: alertSoundsEnabledStorageKey)
             : soundVolume > 0
+        let enableContextGathering = UserDefaults.standard.object(forKey: enableContextGatheringStorageKey) == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: enableContextGatheringStorageKey)
         
         let initialMacros: [VoiceMacro]
         if let data = UserDefaults.standard.data(forKey: "voice_macros"),
@@ -709,6 +719,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.isPressEnterVoiceCommandEnabled = isPressEnterVoiceCommandEnabled
         self.alertSoundsEnabled = alertSoundsEnabled
         self.soundVolume = soundVolume
+        self.enableContextGathering = enableContextGathering
         self.voiceMacros = initialMacros
         self.pipelineHistory = savedHistory
         self.hasAccessibility = initialAccessibility
@@ -2054,7 +2065,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 os_log(.info, log: recordingLog, "audioRecorder.startRecording() done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
                 DispatchQueue.main.async {
                     guard self.isRecording, self.activeRecordingTriggerMode != nil else { return }
-                    self.startContextCapture()
+                    if self.enableContextGathering {
+                        self.startContextCapture()
+                    }
                     self.audioLevelCancellable = self.audioRecorder.$audioLevel
                         .receive(on: DispatchQueue.main)
                         .sink { [weak self] level in
@@ -2424,7 +2437,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     )
                     try Task.checkCancellation()
                     let appContext: AppContext
-                    if let sessionContext {
+                    if !self.enableContextGathering {
+                        appContext = Self.emptyContext
+                    } else if let sessionContext {
                         appContext = sessionContext
                     } else if let inFlightContext = await inFlightContextTask?.value {
                         appContext = inFlightContext
@@ -2539,7 +2554,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     }
                 } catch {
                     let resolvedContext: AppContext
-                    if let sessionContext {
+                    if !self.enableContextGathering {
+                        resolvedContext = Self.emptyContext
+                    } else if let sessionContext {
                         resolvedContext = sessionContext
                     } else if let inFlightContext = await inFlightContextTask?.value {
                         resolvedContext = inFlightContext
@@ -2709,6 +2726,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
             screenshotError: "No app context captured before stop"
         )
     }
+
+    /// Lightweight context used when context gathering is disabled — skips screenshot + LLM analysis entirely.
+    private static let emptyContext = AppContext(
+        appName: nil,
+        bundleIdentifier: nil,
+        windowTitle: nil,
+        selectedText: nil,
+        currentActivity: "Context gathering disabled by user.",
+        contextSystemPrompt: nil,
+        contextPrompt: nil,
+        screenshotDataURL: nil,
+        screenshotMimeType: nil,
+        screenshotError: "Context gathering disabled"
+    )
 
     private func resolvedContextSystemPrompt() -> String {
         let trimmedPrompt = customContextPrompt.trimmingCharacters(in: .whitespacesAndNewlines)

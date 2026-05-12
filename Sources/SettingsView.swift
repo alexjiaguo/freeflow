@@ -721,6 +721,14 @@ struct GeneralSettingsView: View {
                 SettingsCard("Custom Vocabulary", icon: "text.book.closed.fill") {
                     vocabularySection
                 }
+                SettingsCard("Context Gathering", icon: "eye.fill") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Enable context gathering", isOn: $appState.enableContextGathering)
+                        Text("When disabled, skips screenshot capture and LLM context analysis for faster dictation.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
                 SettingsCard("Permissions", icon: "lock.shield.fill") {
                     permissionsSection
                 }
